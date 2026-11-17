@@ -130,7 +130,7 @@ void HaldenReverbAudioProcessor::releaseResources()
     shiftL.reset(); shiftR.reset(); glideL.reset(); glideR.reset();
     onset.prepare (currentSampleRate);
     samplesSinceOnset = 1.0e9;
-    glideSemis = riserSmooth = 0.0f;
+    glideSemis = riserSmooth = glideW = actFast = actPeak = shimEnv = lastWetL = lastWetR = 0.0f;
     tankL = tankR = xoverLpL = xoverLpR = dampLpL = dampLpR = inHpL = inHpR = dryEnv = duckEnv = 0.0f;
     pumpGain = gateGain = 1.0f;
     gateOpenSamples = 0;
@@ -193,7 +193,7 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     // ---- Parameters
     const float riserRaw = raw (apvts, "riserOn") >= 0.5f ? raw (apvts, "riserAmt") : 0.0f;
-    riserSmooth += 0.25f * (riserRaw - riserSmooth);
+    riserSmooth += (1.0f - std::exp (-static_cast<float> (numSamples) / (0.12f * static_cast<float> (currentSampleRate)))) * (riserRaw - riserSmooth);
     if (std::abs (riserRaw - riserSmooth) < 1.0e-4f) riserSmooth = riserRaw;
     const float riser = riserSmooth;
     const float sizeTarget = raw (apvts, "size") * prof.tankScale;
@@ -220,17 +220,20 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const double gateBeats = kGateBeats[juce::jlimit (0, 3, static_cast<int> (raw (apvts, "gateLen")))];
     const float gateRelMs = raw (apvts, "gateRelease");
 
-    // Shimmer: pitch-shifted feedback inside the tank (cascading). Glide: the whole tail bends
-    // smoothly to the interval after each new phrase. Riser adds an octave-up shimmer on its own.
+    // Shimmer: the wet signal is pitch-shifted and fed back into the reverb input, so each pass
+    // through the whole reverb adds a new layer an interval away (classic bloom, not a fast cascade).
+    // Glide: after a phrase ends, the tail bends smoothly to the interval; it never moves while singing.
+    // Riser adds an octave-up shimmer of its own.
     const bool glideOn = shimOn && shimGlide;
     const bool cascadeOn = shimOn && ! shimGlide;
     const float glideAmt = glideOn ? raw (apvts, "shimMix") : 0.0f;
-    float shimAmount = cascadeOn ? raw (apvts, "shimMix") * 0.8f : 0.0f;
+    float shimAmount = cascadeOn ? raw (apvts, "shimMix") * 0.9f : 0.0f;
     const float semis = cascadeOn ? shimInterval : 12.0f;
-    shimAmount = std::min (0.85f, shimAmount + 0.30f * riser);
-    const float glideSeconds = juce::jlimit (0.4f, 6.0f, raw (apvts, "decay") * 0.7f);
-    const float glideSmooth = 1.0f - std::exp (-1.0f / (0.025f * sr));
-    const float shimRatio = std::pow (2.0f, semis / 12.0f);
+    shimAmount = std::min (0.92f, shimAmount + 0.45f * riser);
+    const float glideSeconds = juce::jlimit (0.5f, 6.0f, raw (apvts, "decay") * 0.8f);
+    const float glideSmooth = 1.0f - std::exp (-1.0f / (0.030f * sr));
+    const float shimRatioL = std::pow (2.0f, (semis + 0.04f) / 12.0f);   // +-4 cents: wider, less metallic
+    const float shimRatioR = std::pow (2.0f, (semis - 0.04f) / 12.0f);
     const bool monoBassOn = raw (apvts, "monoOn") >= 0.5f || (shimOn && shimInterval < 0.0f);
     const float monoHz = raw (apvts, "monoHz");
 
@@ -282,7 +285,7 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         smShim.reset (s, 0.08, shimAmount);
         smFreeze.reset (s, raw (apvts, "freezeFade"), freezeOn ? 1.0f : 0.0f);
         smRiserWidth.reset (s, 0.05, 0.5f * riser);
-        smRiserGain.reset (s, 0.05, 1.0f + 0.4f * riser);
+        smRiserGain.reset (s, 0.05, juce::Decibels::decibelsToGain (6.0f * riser));
         firstBlock = false;
     }
 
@@ -301,7 +304,7 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     smFreeze.steps = std::max (1, static_cast<int> (currentSampleRate * raw (apvts, "freezeFade")));
     smFreeze.setTarget (freezeOn ? 1.0f : 0.0f);
     smRiserWidth.setTarget (0.5f * riser);
-    smRiserGain.setTarget (1.0f + 0.4f * riser);
+    smRiserGain.setTarget (juce::Decibels::decibelsToGain (6.0f * riser));
 
     if (eqEnabled)
     {
@@ -312,7 +315,7 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const bool riserFilter = riser > 0.001f;
     if (riserFilter)
     {
-        const float hp = 20.0f * std::pow (75.0f, riser * riser);
+        const float hp = 20.0f * std::pow (30.0f, riser);   // 20 Hz -> 600 Hz
         riserHpL1.setHighPass (hp, sr); riserHpL2.setHighPass (hp, sr);
         riserHpR1.setHighPass (hp, sr); riserHpR2.setHighPass (hp, sr);
     }
@@ -322,9 +325,10 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         monoSideHp2.setHighPass (monoHz, sr);
     }
     {
-        const float shimHp = semis < 0.0f ? 110.0f : 280.0f;
+        const float shimHp = semis < 0.0f ? 90.0f : 220.0f;
+        const float shimLp = semis < 0.0f ? 5000.0f : 8000.0f;
         shimHpL.setHighPass (shimHp, sr); shimHpR.setHighPass (shimHp, sr);
-        shimLpL.setLowPass (9000.0f, sr); shimLpR.setLowPass (9000.0f, sr);
+        shimLpL.setLowPass (shimLp, sr); shimLpR.setLowPass (shimLp, sr);
     }
 
     const float inDiff1 = 0.25f + diffusion * 0.50f;
@@ -339,6 +343,12 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const float envRel = 1.0f - std::exp (-1.0f / (0.18f * sr));
     const float pumpAlpha = 1.0f - std::exp (-1.0f / (0.003f * sr));
     const float gateAtk = 1.0f - std::exp (-1.0f / (0.001f * sr));
+    const float actAtk = 1.0f - std::exp (-1.0f / (0.002f * sr));
+    const float actRel = 1.0f - std::exp (-1.0f / (0.040f * sr));
+    const float actPeakRel = std::exp (-1.0f / (0.30f * sr));
+    const float shimEnvRel = std::exp (-1.0f / (0.25f * sr));
+    const float glideFadeIn = 1.0f / (0.15f * sr);
+    const float glideFadeOut = 1.0f / (0.12f * sr);
     const float gateRel = 1.0f - std::exp (-1.0f / (gateRelMs * 0.001f * sr));
     const float randAlpha = 1.0f - std::exp (-1.0f / (0.09f * sr));
     const int randPeriod = std::max (1, static_cast<int> (sr * 0.07f));
@@ -367,7 +377,6 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         const float freeze = smFreeze.next();
         const float gM = smGMid.next() * (1.0f - freeze) + 0.99995f * freeze;
         const float gL = smGLow.next() * (1.0f - freeze) + 0.99995f * freeze;
-        const float shim = smShim.next();
 
         // ---- Ducking envelope (dry level), also used as the gate trigger
         const float dryLvl = std::max (std::abs (dryL), std::abs (dryR));
@@ -377,9 +386,14 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             : 1.0f;
         minDuckGain = std::min (minDuckGain, duckGain);
 
-        // ---- Phrase onsets (level independent): retrigger Gate and Glide
+        // ---- Phrase activity (level independent): input counts as "sounding" while it is sustained,
+        //      i.e. within 6 dB of its short-term peak (a held note yes, a decaying drum hit no).
+        //      Gate stays open while sounding and for its length after; Glide waits for silence.
+        actFast += (dryLvl > actFast ? actAtk : actRel) * (dryLvl - actFast);
+        actPeak = std::max (actFast, actPeak * actPeakRel);
         const bool hit = onset.process (dryLvl);
-        if (hit)
+        const bool sounding = actFast > 0.0005f && actFast > actPeak * 0.5f;
+        if (sounding || hit)
         {
             samplesSinceOnset = 0.0;
             gateOpenSamples = gateLenSamples;
@@ -399,7 +413,20 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         const float preR = preDelayR.readFrac (preSamples);
         const float monoIn = 0.5f * (preL + preR);
 
-        float diff = inAp1.process (monoIn, 142.0f * srScale, inDiff1);
+        float shimFeed = 0.0f;
+        const float shim = smShim.next() * (1.0f - freeze);
+        if (shim > 0.0005f)
+        {
+            const float sL = shimLpL.process (shimHpL.process (shiftL.process (lastWetL, shimRatioL)));
+            const float sR = shimLpR.process (shimHpR.process (shiftR.process (lastWetR, shimRatioR)));
+            shimFeed = shim * 0.5f * (sL + sR);
+            // safety limiter on the feedback path: the loop can never run away
+            const float a = std::abs (shimFeed);
+            shimEnv = a > shimEnv ? a : shimEnv * shimEnvRel;
+            if (shimEnv > 0.35f) shimFeed *= 0.35f / shimEnv;
+        }
+
+        float diff = inAp1.process (monoIn + shimFeed, 142.0f * srScale, inDiff1);
         diff = inAp2.process (diff, 107.0f * srScale, inDiff1);
         diff = inAp3.process (diff, 379.0f * srScale, inDiff2);
         diff = inAp4.process (diff, 277.0f * srScale, inDiff2);
@@ -435,14 +462,7 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
         // ---- Tank (cross-coupled, with optional pitch-shifted feedback for shimmer)
         const float feedIn = diff * (1.0f - freeze);
-        float crossR = tankR, crossL = tankL;
-        if (shim > 0.0005f)
-        {
-            const float sR = shimLpR.process (shimHpR.process (shiftR.process (tankR, shimRatio)));
-            const float sL = shimLpL.process (shimHpL.process (shiftL.process (tankL, shimRatio)));
-            crossR = (1.0f - shim) * tankR + shim * sR;
-            crossL = (1.0f - shim) * tankL + shim * sL;
-        }
+        const float crossR = tankR, crossL = tankL;
 
         const float mApL = modApL.process (feedIn + crossR, 672.0f * srScale * tankClampSize + lfoL * modDepth, tankDiff1, hq);
         delayL1.write (mApL);
@@ -487,17 +507,33 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         const float lateW = smLateWeight.next();
         wetL = erL * erW + wetL * 0.42f * lateW;
         wetR = erR * erW + wetR * 0.42f * lateW;
+        lastWetL = haldendsp::flushDenormal (wetL);
+        lastWetR = haldendsp::flushDenormal (wetR);
 
         // ---- FX: Shimmer Glide (tail bends to the interval after each phrase)
-        if (glideOn || glideAmt > 0.0f)
+        if (glideOn || glideW > 0.0f)
         {
-            const float progress = smoothstep (0.0f, 1.0f, static_cast<float> (samplesSinceOnset / (glideSeconds * sr)));
-            glideSemis += glideSmooth * (shimInterval * progress - glideSemis);
+            const float silentSec = static_cast<float> (samplesSinceOnset / sr) - 0.12f;
+            const bool gliding = glideOn && freeze < 0.5f && silentSec > 0.0f;
+            if (gliding)
+            {
+                const float progress = smoothstep (0.0f, 1.0f, silentSec / glideSeconds);
+                glideSemis += glideSmooth * (shimInterval * progress - glideSemis);
+                glideW = std::min (1.0f, glideW + glideFadeIn);
+            }
+            else
+            {
+                // new phrase (or Glide switched off): keep the bent tail where it is and fade it out,
+                // then reset quietly. The pitch never jumps.
+                glideW = std::max (0.0f, glideW - glideFadeOut);
+                if (glideW <= 0.0f) glideSemis = 0.0f;
+            }
             const float ratio = std::pow (2.0f, glideSemis / 12.0f);
-            const float gl = glideL.process (wetL, ratio) * 1.35f;
-            const float gr = glideR.process (wetR, ratio) * 1.35f;
-            wetL = wetL * (1.0f - glideAmt) + gl * glideAmt;
-            wetR = wetR * (1.0f - glideAmt) + gr * glideAmt;
+            const float gl = glideL.process (wetL, ratio);
+            const float gr = glideR.process (wetR, ratio);
+            const float w = glideW * (glideOn ? glideAmt : 1.0f);
+            wetL = wetL * (1.0f - w) + gl * w;
+            wetR = wetR * (1.0f - w) + gr * w;
         }
 
         // ---- FX: Riser (high-pass sweep, lift and widen)

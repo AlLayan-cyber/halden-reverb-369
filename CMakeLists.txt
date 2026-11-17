@@ -5,7 +5,7 @@ if(APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS deployment target")
 endif()
 
-project(HaldenReverb369 VERSION 1.0.1)
+project(HaldenReverb369 VERSION 1.0.2)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

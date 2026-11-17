@@ -67,7 +67,8 @@ private:
     haldendsp::PitchShifter shiftL, shiftR, glideL, glideR;
     haldendsp::OnsetDetector onset;
     double samplesSinceOnset = 1.0e9;
-    float glideSemis = 0.0f, riserSmooth = 0.0f;
+    float glideSemis = 0.0f, riserSmooth = 0.0f, glideW = 0.0f;
+    float actFast = 0.0f, actPeak = 0.0f, shimEnv = 0.0f, lastWetL = 0.0f, lastWetR = 0.0f;
 
     // Smoothed controls (per sample)
     haldendsp::Smooth smPreDelay, smSize, smGMid, smGLow, smErWeight, smLateWeight, smModDepth,

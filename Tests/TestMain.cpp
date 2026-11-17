@@ -190,17 +190,40 @@ static int runDsp()
     }
     { // 10b. Glide bends the tail an octave down after the phrase
         P p; setP (p, "mix", 1); setP (p, "decay", 3); setP (p, "shimOn", 1); setP (p, "shimPitch", 0); setP (p, "shimMix", 1); setP (p, "shimGlide", 1);
-        auto o = render (p, sr, 3.5, [&] (int n, int) { return n < 19200 ? 0.5f * std::sin (n * juce::MathConstants<float>::twoPi * 440.0f / 48000.0f) : 0.0f; });
-        std::vector<float> tail (o.L.begin() + (int) (2.2 * sr), o.L.begin() + (int) (3.2 * sr));
+        auto o = render (p, sr, 3.8, [&] (int n, int) { return n < 19200 ? 0.5f * std::sin (n * juce::MathConstants<float>::twoPi * 440.0f / 48000.0f) : 0.0f; });
+        std::vector<float> tail (o.L.begin() + (int) (2.8 * sr), o.L.begin() + (int) (3.6 * sr));
         const auto band = [&] (float f) { haldendsp::BiquadFilter a, b; a.setLowPass (f * 1.1f, (float) sr, 4); b.setHighPass (f / 1.1f, (float) sr, 4); double e = 0; for (float x : tail) { float y = b.process (a.process (x)); e += y * y; } return e; };
         const double r = 10 * std::log10 (band (220) / band (440));
         check (r > 20.0, "Glide -12 moves the tail an octave down", juce::String (r, 1) + " dB (220 vs 440 Hz)");
     }
+    { // 10b2. Glide leaves the tail alone while the phrase is still sounding (same spectrum as no glide)
+        const auto ratio = [&] (bool glide)
+        {
+            P p; setP (p, "mix", 1); setP (p, "decay", 3); setP (p, "shimOn", glide ? 1.0f : 0.0f); setP (p, "shimPitch", 0); setP (p, "shimMix", 1); setP (p, "shimGlide", 1); setP (p, "monoOn", 1);
+            auto o = render (p, sr, 2.0, [&] (int n, int) { return 0.4f * std::sin (n * juce::MathConstants<float>::twoPi * 440.0f / 48000.0f); });
+            std::vector<float> tail (o.L.begin() + (int) (1.0 * sr), o.L.begin() + (int) (2.0 * sr));
+            const auto band = [&] (float f) { haldendsp::BiquadFilter a, b; a.setLowPass (f * 1.1f, (float) sr, 4); b.setHighPass (f / 1.1f, (float) sr, 4); double e = 0; for (float x : tail) { float y = b.process (a.process (x)); e += y * y; } return e; };
+            return 10 * std::log10 (band (440) / band (220));
+        };
+        const double plain = ratio (false), glide = ratio (true);
+        check (std::abs (glide - plain) < 1.5, "Glide does not bend while singing", "440/220 Hz: plain " + juce::String (plain, 1) + " dB, glide " + juce::String (glide, 1) + " dB");
+    }
     { // 10c. Gate opens on quiet material too (-36 dBFS)
-        P p; setP (p, "mix", 1); setP (p, "decay", 4); setP (p, "gateOn", 1); setP (p, "gateLen", 1); setP (p, "gateRelease", 30);
+        P p; setP (p, "mix", 1); setP (p, "decay", 4); setP (p, "gateOn", 1); setP (p, "gateLen", 1); setP (p, "gateRelease", 10);
         auto o = render (p, sr, 2, [&] (int n, int) { const int ph = n % 24000; return ph < 3800 ? 0.016f * std::sin (n * 0.0432f) : 0.0f; });
-        const double open = energy (o.L, (size_t) (1.02 * sr), (size_t) (1.2 * sr)), closed = energy (o.L, (size_t) (1.36 * sr), (size_t) (1.48 * sr));
-        check (open > 1e-6 && 10 * std::log10 (open / (closed + 1e-30)) > 30, "Gate triggers on quiet input", juce::String (10 * std::log10 (open / (closed + 1e-30)), 1) + " dB open/closed");
+        const double open = energy (o.L, (size_t) (1.02 * sr), (size_t) (1.2 * sr)), closed = energy (o.L, (size_t) (1.46 * sr), (size_t) (1.50 * sr));
+        check (open > 1e-6 && 10 * std::log10 (open / 4.5 / (closed + 1e-30)) > 30, "Gate triggers on quiet input", juce::String (10 * std::log10 (open / (closed + 1e-30)), 1) + " dB open/closed");
+    }
+    { // 10d. Gate stays open through a legato phrase
+        P p; setP (p, "mix", 1); setP (p, "decay", 4); setP (p, "gateOn", 1); setP (p, "gateLen", 0); setP (p, "gateRelease", 20);
+        auto o = render (p, sr, 2.5, [&] (int n, int) { const float f = n < 24000 ? 220.0f : n < 48000 ? 277.0f : n < 72000 ? 330.0f : 0.0f; return f > 0 ? 0.3f * std::sin (n * juce::MathConstants<float>::twoPi * f / 48000.0f) : 0.0f; });
+        double minDb = 0;
+        for (double t0 = 0.3; t0 < 1.45; t0 += 0.05)
+        {
+            const double e = energy (o.L, (size_t) (t0 * sr), (size_t) ((t0 + 0.05) * sr)) / (0.05 * sr);
+            minDb = std::min (minDb, 10 * std::log10 (e + 1e-30));
+        }
+        check (minDb > -40.0, "Gate open through legato notes", "quietest 50 ms: " + juce::String (minDb, 1) + " dBFS");
     }
     { // 11. Gate closes the tail after length + release
         P p; setP (p, "mix", 1); setP (p, "decay", 6); setP (p, "gateOn", 1); setP (p, "gateLen", 1); setP (p, "gateRelease", 30);
