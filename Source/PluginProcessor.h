@@ -87,7 +87,6 @@ private:
     double freeRunPpq = 0.0;
     int gateOpenSamples = 0;
     bool gateArmed = true;
-    float shimSemis = 0.0f;
     bool firstBlock = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HaldenReverbAudioProcessor)

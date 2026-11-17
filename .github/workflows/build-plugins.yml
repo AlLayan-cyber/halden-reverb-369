@@ -24,18 +24,24 @@ jobs:
       - name: Build VST3 and Audio Unit (.component)
         run: cmake --build build --config Release --target HaldenReverb369_VST3 HaldenReverb369_AU -j 4
 
-      - name: Collect macOS Artifacts
+      - name: Sign (ad-hoc) and package macOS plugins
         run: |
+          OUT=build/HaldenReverb369_artefacts/Release
           mkdir -p dist-macos
-          find build -type d -name "*.vst3" -prune -exec cp -R {} dist-macos/ +
-          find build -type d -name "*.component" -prune -exec cp -R {} dist-macos/ +
-          ls -la dist-macos
+          cp -R "$OUT/VST3/Halden Reverb 369.vst3" dist-macos/
+          cp -R "$OUT/AU/Halden Reverb 369.component" dist-macos/
+          codesign --force --deep --sign - "dist-macos/Halden Reverb 369.vst3"
+          codesign --force --deep --sign - "dist-macos/Halden Reverb 369.component"
+          cd dist-macos
+          ditto -c -k --keepParent "Halden Reverb 369.vst3" "Halden-Reverb-369-macOS-VST3.zip"
+          ditto -c -k --keepParent "Halden Reverb 369.component" "Halden-Reverb-369-macOS-AU.zip"
+          ls -la
 
       - name: Upload macOS VST3 & AU
         uses: actions/upload-artifact@v4
         with:
           name: HaldenReverb369-macOS-VST3-AU
-          path: dist-macos/
+          path: dist-macos/*.zip
 
   build-windows:
     name: Windows x64 (VST3)
