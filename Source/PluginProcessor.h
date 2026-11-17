@@ -64,7 +64,10 @@ private:
     haldendsp::BiquadFilter riserHpL1, riserHpR1, riserHpL2, riserHpR2;
     haldendsp::BiquadFilter monoSideHp1, monoSideHp2;
     haldendsp::BiquadFilter shimHpL, shimHpR, shimLpL, shimLpR;
-    haldendsp::PitchShifter shiftL, shiftR;
+    haldendsp::PitchShifter shiftL, shiftR, glideL, glideR;
+    haldendsp::OnsetDetector onset;
+    double samplesSinceOnset = 1.0e9;
+    float glideSemis = 0.0f, riserSmooth = 0.0f;
 
     // Smoothed controls (per sample)
     haldendsp::Smooth smPreDelay, smSize, smGMid, smGLow, smErWeight, smLateWeight, smModDepth,
@@ -86,7 +89,6 @@ private:
 
     double freeRunPpq = 0.0;
     int gateOpenSamples = 0;
-    bool gateArmed = true;
     bool firstBlock = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HaldenReverbAudioProcessor)

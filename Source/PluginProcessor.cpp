@@ -74,7 +74,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout HaldenReverbAudioProcessor::
     p.push_back (std::make_unique<APF> (pid ("pumpDepth"), "Pump Depth", NRange (0.0f, 1.0f, 0.01f), 0.6f));
     p.push_back (std::make_unique<APB> (pid ("shimOn"), "Shimmer", false));
     p.push_back (std::make_unique<APC> (pid ("shimPitch"), "Shimmer Pitch", juce::StringArray { "-12", "-7", "+7", "+12" }, 3));
-    p.push_back (std::make_unique<APF> (pid ("shimMix"), "Shimmer Amount", NRange (0.0f, 1.0f, 0.01f), 0.3f));
+    p.push_back (std::make_unique<APF> (pid ("shimMix"), "Shimmer Amount", NRange (0.0f, 1.0f, 0.01f), 0.5f));
     p.push_back (std::make_unique<APB> (pid ("shimGlide"), "Shimmer Glide", false));
     p.push_back (std::make_unique<APB> (pid ("freezeOn"), "Freeze", false));
     p.push_back (std::make_unique<APF> (pid ("freezeFade"), "Freeze Fade", NRange (0.02f, 4.0f, 0.01f, 0.5f), 0.4f));
@@ -106,8 +106,11 @@ void HaldenReverbAudioProcessor::prepareToPlay (double sampleRate, int)
     delayL1.resize (sz (10000.0f)); delayR1.resize (sz (10000.0f));
     apL2.resize (sz (6000.0f)); apR2.resize (sz (6000.0f));
     delayL2.resize (sz (9000.0f)); delayR2.resize (sz (9000.0f));
-    shiftL.prepare (sampleRate);
-    shiftR.prepare (sampleRate);
+    shiftL.prepare (sampleRate, 0.080);
+    shiftR.prepare (sampleRate, 0.080);
+    glideL.prepare (sampleRate, 0.080);
+    glideR.prepare (sampleRate, 0.080);
+    onset.prepare (sampleRate);
 
     firstBlock = true;
     releaseResources();
@@ -124,11 +127,13 @@ void HaldenReverbAudioProcessor::releaseResources()
     for (auto* f : { &eqHpfL, &eqHpfR, &eqLpfL, &eqLpfR, &riserHpL1, &riserHpR1, &riserHpL2, &riserHpR2,
                      &monoSideHp1, &monoSideHp2, &shimHpL, &shimHpR, &shimLpL, &shimLpR })
         f->reset();
-    shiftL.reset(); shiftR.reset();
+    shiftL.reset(); shiftR.reset(); glideL.reset(); glideR.reset();
+    onset.prepare (currentSampleRate);
+    samplesSinceOnset = 1.0e9;
+    glideSemis = riserSmooth = 0.0f;
     tankL = tankR = xoverLpL = xoverLpR = dampLpL = dampLpR = inHpL = inHpR = dryEnv = duckEnv = 0.0f;
     pumpGain = gateGain = 1.0f;
     gateOpenSamples = 0;
-    gateArmed = true;
     scopeScratchCount = 0;
     for (auto& v : inPeak)  v.store (0.0f);
     for (auto& v : outPeak) v.store (0.0f);
@@ -187,8 +192,11 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const float twoPi = juce::MathConstants<float>::twoPi;
 
     // ---- Parameters
-    const float riser = raw (apvts, "riserOn") >= 0.5f ? raw (apvts, "riserAmt") : 0.0f;
-    const float sizeTarget = raw (apvts, "size") * prof.tankScale * (1.0f + 0.18f * riser);
+    const float riserRaw = raw (apvts, "riserOn") >= 0.5f ? raw (apvts, "riserAmt") : 0.0f;
+    riserSmooth += 0.25f * (riserRaw - riserSmooth);
+    if (std::abs (riserRaw - riserSmooth) < 1.0e-4f) riserSmooth = riserRaw;
+    const float riser = riserSmooth;
+    const float sizeTarget = raw (apvts, "size") * prof.tankScale;
     const float decaySec = raw (apvts, "decay") * (1.0f + 2.0f * riser);
     const float bassMult = raw (apvts, "bassMult");
     const float crossoverHz = raw (apvts, "crossoverHz");
@@ -212,12 +220,16 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const double gateBeats = kGateBeats[juce::jlimit (0, 3, static_cast<int> (raw (apvts, "gateLen")))];
     const float gateRelMs = raw (apvts, "gateRelease");
 
-    // Shimmer amount and interval (Riser adds an octave-up shimmer on its own)
-    float shimAmount = shimOn ? raw (apvts, "shimMix") * 0.7f : 0.0f;
-    float semis = shimOn ? shimInterval : 12.0f;
+    // Shimmer: pitch-shifted feedback inside the tank (cascading). Glide: the whole tail bends
+    // smoothly to the interval after each new phrase. Riser adds an octave-up shimmer on its own.
+    const bool glideOn = shimOn && shimGlide;
+    const bool cascadeOn = shimOn && ! shimGlide;
+    const float glideAmt = glideOn ? raw (apvts, "shimMix") : 0.0f;
+    float shimAmount = cascadeOn ? raw (apvts, "shimMix") * 0.8f : 0.0f;
+    const float semis = cascadeOn ? shimInterval : 12.0f;
     shimAmount = std::min (0.85f, shimAmount + 0.30f * riser);
-    if (shimOn && shimGlide)
-        semis = shimInterval < 0.0f ? -1.0f : 1.0f;   // small step per pass = continuous glide
+    const float glideSeconds = juce::jlimit (0.4f, 6.0f, raw (apvts, "decay") * 0.7f);
+    const float glideSmooth = 1.0f - std::exp (-1.0f / (0.025f * sr));
     const float shimRatio = std::pow (2.0f, semis / 12.0f);
     const bool monoBassOn = raw (apvts, "monoOn") >= 0.5f || (shimOn && shimInterval < 0.0f);
     const float monoHz = raw (apvts, "monoHz");
@@ -365,6 +377,18 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             : 1.0f;
         minDuckGain = std::min (minDuckGain, duckGain);
 
+        // ---- Phrase onsets (level independent): retrigger Gate and Glide
+        const bool hit = onset.process (dryLvl);
+        if (hit)
+        {
+            samplesSinceOnset = 0.0;
+            gateOpenSamples = gateLenSamples;
+        }
+        else
+        {
+            samplesSinceOnset += 1.0;
+        }
+
         // ---- Input conditioning, pre-delay and input diffusion
         inHpL += hpAlpha * (dryL - inHpL);
         inHpR += hpAlpha * (dryR - inHpR);
@@ -406,7 +430,8 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         const float rm = prof.randomMod;
         const float lfoL = (std::sin (spinPhase) * 0.6f + std::sin (wanderPhase) * 0.4f) * (1.0f - rm) + randomValue * rm;
         const float lfoR = (std::cos (spinPhase) * 0.6f + std::cos (wanderPhase * 0.87f) * 0.4f) * (1.0f - rm) - randomValue * rm;
-        const float modDepth = smModDepth.next();
+        const float modDepth = smModDepth.next() * (1.0f - freeze);
+        const bool hq = freeze > 0.001f;
 
         // ---- Tank (cross-coupled, with optional pitch-shifted feedback for shimmer)
         const float feedIn = diff * (1.0f - freeze);
@@ -419,49 +444,61 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             crossL = (1.0f - shim) * tankL + shim * sL;
         }
 
-        const float mApL = modApL.process (feedIn + crossR, 672.0f * srScale * tankClampSize + lfoL * modDepth, tankDiff1);
+        const float mApL = modApL.process (feedIn + crossR, 672.0f * srScale * tankClampSize + lfoL * modDepth, tankDiff1, hq);
         delayL1.write (mApL);
-        const float dL1Out = delayL1.readFrac (4453.0f * srScale * sizeParam);
+        const float dL1Out = delayL1.read (4453.0f * srScale * sizeParam, hq);
         xoverLpL += xoverAlpha * (dL1Out - xoverLpL);
         dampLpL += highAlpha * ((dL1Out - xoverLpL) - dampLpL);
         const float dampedL = (xoverLpL * gL + dampLpL * gM) * (1.0f - freeze) + dL1Out * gM * freeze;
-        delayL2.write (apL2.process (dampedL, 1800.0f * srScale * sizeParam, -tankDiff2));
-        const float nextTankL = delayL2.readFrac (3720.0f * srScale * sizeParam);
+        delayL2.write (apL2.process (dampedL, 1800.0f * srScale * sizeParam, -tankDiff2, hq));
+        const float nextTankL = delayL2.read (3720.0f * srScale * sizeParam, hq);
 
-        const float mApR = modApR.process (feedIn + crossL, 908.0f * srScale * tankClampSize + lfoR * modDepth, tankDiff1);
+        const float mApR = modApR.process (feedIn + crossL, 908.0f * srScale * tankClampSize + lfoR * modDepth, tankDiff1, hq);
         delayR1.write (mApR);
-        const float dR1Out = delayR1.readFrac (4217.0f * srScale * sizeParam);
+        const float dR1Out = delayR1.read (4217.0f * srScale * sizeParam, hq);
         xoverLpR += xoverAlpha * (dR1Out - xoverLpR);
         dampLpR += highAlpha * ((dR1Out - xoverLpR) - dampLpR);
         const float dampedR = (xoverLpR * gL + dampLpR * gM) * (1.0f - freeze) + dR1Out * gM * freeze;
-        delayR2.write (apR2.process (dampedR, 2656.0f * srScale * sizeParam, -tankDiff2));
-        const float nextTankR = delayR2.readFrac (3163.0f * srScale * sizeParam);
+        delayR2.write (apR2.process (dampedR, 2656.0f * srScale * sizeParam, -tankDiff2, hq));
+        const float nextTankR = delayR2.read (3163.0f * srScale * sizeParam, hq);
 
         tankL = haldendsp::flushDenormal (nextTankL);
         tankR = haldendsp::flushDenormal (nextTankR);
 
         float wetL =
-            0.6f * delayR1.readFrac (266.0f * srScale * sizeParam) +
-            0.6f * delayR1.readFrac (2974.0f * srScale * sizeParam) -
-            0.5f * apR2.delay.readFrac (1235.0f * srScale * sizeParam) +
-            0.5f * delayR2.readFrac (1996.0f * srScale * sizeParam) -
-            0.5f * delayL1.readFrac (1990.0f * srScale * sizeParam) -
-            0.4f * apL2.delay.readFrac (187.0f * srScale * sizeParam) -
-            0.4f * delayL2.readFrac (1066.0f * srScale * sizeParam);
+            0.6f * delayR1.read (266.0f * srScale * sizeParam, hq) +
+            0.6f * delayR1.read (2974.0f * srScale * sizeParam, hq) -
+            0.5f * apR2.delay.read (1235.0f * srScale * sizeParam, hq) +
+            0.5f * delayR2.read (1996.0f * srScale * sizeParam, hq) -
+            0.5f * delayL1.read (1990.0f * srScale * sizeParam, hq) -
+            0.4f * apL2.delay.read (187.0f * srScale * sizeParam, hq) -
+            0.4f * delayL2.read (1066.0f * srScale * sizeParam, hq);
 
         float wetR =
-            0.6f * delayL1.readFrac (353.0f * srScale * sizeParam) +
-            0.6f * delayL1.readFrac (3627.0f * srScale * sizeParam) -
-            0.5f * apL2.delay.readFrac (1228.0f * srScale * sizeParam) +
-            0.5f * delayL2.readFrac (2673.0f * srScale * sizeParam) -
-            0.5f * delayR1.readFrac (2111.0f * srScale * sizeParam) -
-            0.4f * apR2.delay.readFrac (335.0f * srScale * sizeParam) -
-            0.4f * delayR2.readFrac (121.0f * srScale * sizeParam);
+            0.6f * delayL1.read (353.0f * srScale * sizeParam, hq) +
+            0.6f * delayL1.read (3627.0f * srScale * sizeParam, hq) -
+            0.5f * apL2.delay.read (1228.0f * srScale * sizeParam, hq) +
+            0.5f * delayL2.read (2673.0f * srScale * sizeParam, hq) -
+            0.5f * delayR1.read (2111.0f * srScale * sizeParam, hq) -
+            0.4f * apR2.delay.read (335.0f * srScale * sizeParam, hq) -
+            0.4f * delayR2.read (121.0f * srScale * sizeParam, hq);
 
         const float erW = smErWeight.next() * (1.0f - freeze);
         const float lateW = smLateWeight.next();
         wetL = erL * erW + wetL * 0.42f * lateW;
         wetR = erR * erW + wetR * 0.42f * lateW;
+
+        // ---- FX: Shimmer Glide (tail bends to the interval after each phrase)
+        if (glideOn || glideAmt > 0.0f)
+        {
+            const float progress = smoothstep (0.0f, 1.0f, static_cast<float> (samplesSinceOnset / (glideSeconds * sr)));
+            glideSemis += glideSmooth * (shimInterval * progress - glideSemis);
+            const float ratio = std::pow (2.0f, glideSemis / 12.0f);
+            const float gl = glideL.process (wetL, ratio) * 1.35f;
+            const float gr = glideR.process (wetR, ratio) * 1.35f;
+            wetL = wetL * (1.0f - glideAmt) + gl * glideAmt;
+            wetR = wetR * (1.0f - glideAmt) + gr * glideAmt;
+        }
 
         // ---- FX: Riser (high-pass sweep, lift and widen)
         const float riserGain = smRiserGain.next();
@@ -480,8 +517,6 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         // ---- FX: Gate (input-triggered, tempo-synced hold)
         if (gateOn)
         {
-            if (gateArmed && dryEnv > 0.05f) { gateOpenSamples = gateLenSamples; gateArmed = false; }
-            if (dryEnv < 0.02f) gateArmed = true;
             const float target = gateOpenSamples > 0 ? 1.0f : 0.0f;
             if (gateOpenSamples > 0) --gateOpenSamples;
             gateGain += (target > gateGain ? gateAtk : gateRel) * (target - gateGain);
@@ -497,7 +532,8 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         {
             double ph = ppq / pumpBeats;
             ph -= std::floor (ph);
-            pumpTarget = 1.0f - pumpDepth * (1.0f - smoothstep (0.0f, 0.6f, static_cast<float> (ph)));
+            const float rise = smoothstep (0.06f, 0.72f, static_cast<float> (ph));
+            pumpTarget = 1.0f - pumpDepth * (1.0f - rise * rise);
         }
         pumpGain += pumpAlpha * (pumpTarget - pumpGain);
         ppq += beatsPerSample;

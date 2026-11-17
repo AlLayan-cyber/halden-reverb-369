@@ -186,7 +186,21 @@ static int runDsp()
         P p; setP (p, "mix", 1); setP (p, "decay", 1.0f); setP (p, "freezeFade", 0.05f);
         auto o = render (p, sr, 12, [&] (int n, int) { return noiseBurst (n, sr, 0.5f); }, [&] (int pos) { if (pos >= (int) (0.6 * sr)) setP (p, "freezeOn", 1); });
         const double a = energy (o.L, (size_t) (1 * sr), (size_t) (2 * sr)), b = energy (o.L, (size_t) (10 * sr), (size_t) (11 * sr));
-        check (10 * std::log10 (a / b) < 6.0, "Freeze holds tail (decay 1 s, 10 s later)", "loss " + juce::String (10 * std::log10 (a / b), 2) + " dB");
+        check (10 * std::log10 (a / b) < 3.0, "Freeze holds tail (decay 1 s, 10 s later)", "loss " + juce::String (10 * std::log10 (a / b), 2) + " dB");
+    }
+    { // 10b. Glide bends the tail an octave down after the phrase
+        P p; setP (p, "mix", 1); setP (p, "decay", 3); setP (p, "shimOn", 1); setP (p, "shimPitch", 0); setP (p, "shimMix", 1); setP (p, "shimGlide", 1);
+        auto o = render (p, sr, 3.5, [&] (int n, int) { return n < 19200 ? 0.5f * std::sin (n * juce::MathConstants<float>::twoPi * 440.0f / 48000.0f) : 0.0f; });
+        std::vector<float> tail (o.L.begin() + (int) (2.2 * sr), o.L.begin() + (int) (3.2 * sr));
+        const auto band = [&] (float f) { haldendsp::BiquadFilter a, b; a.setLowPass (f * 1.1f, (float) sr, 4); b.setHighPass (f / 1.1f, (float) sr, 4); double e = 0; for (float x : tail) { float y = b.process (a.process (x)); e += y * y; } return e; };
+        const double r = 10 * std::log10 (band (220) / band (440));
+        check (r > 20.0, "Glide -12 moves the tail an octave down", juce::String (r, 1) + " dB (220 vs 440 Hz)");
+    }
+    { // 10c. Gate opens on quiet material too (-36 dBFS)
+        P p; setP (p, "mix", 1); setP (p, "decay", 4); setP (p, "gateOn", 1); setP (p, "gateLen", 1); setP (p, "gateRelease", 30);
+        auto o = render (p, sr, 2, [&] (int n, int) { const int ph = n % 24000; return ph < 3800 ? 0.016f * std::sin (n * 0.0432f) : 0.0f; });
+        const double open = energy (o.L, (size_t) (1.02 * sr), (size_t) (1.2 * sr)), closed = energy (o.L, (size_t) (1.36 * sr), (size_t) (1.48 * sr));
+        check (open > 1e-6 && 10 * std::log10 (open / (closed + 1e-30)) > 30, "Gate triggers on quiet input", juce::String (10 * std::log10 (open / (closed + 1e-30)), 1) + " dB open/closed");
     }
     { // 11. Gate closes the tail after length + release
         P p; setP (p, "mix", 1); setP (p, "decay", 6); setP (p, "gateOn", 1); setP (p, "gateLen", 1); setP (p, "gateRelease", 30);

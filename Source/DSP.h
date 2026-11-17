@@ -46,6 +46,23 @@ public:
              + buffer[static_cast<size_t> (idx1)] * frac;
     }
 
+    // 4-point Hermite interpolation: much less high-frequency loss than linear, used while frozen
+    inline float readHermite (float delaySamples) const noexcept
+    {
+        const int sz = static_cast<int> (buffer.size());
+        const float clamped = juce::jlimit (2.0f, static_cast<float> (sz - 4), delaySamples);
+        const int ip = static_cast<int> (clamped);
+        const float f = clamped - static_cast<float> (ip);
+        const auto at = [this, sz] (int d) { int i = writeIdx - d; if (i < 0) i += sz; return buffer[static_cast<size_t> (i)]; };
+        const float xm1 = at (ip - 1), x0 = at (ip), x1 = at (ip + 1), x2 = at (ip + 2);
+        const float c1 = 0.5f * (x1 - xm1);
+        const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
+        const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
+        return ((c3 * f + c2) * f + c1) * f + x0;
+    }
+
+    inline float read (float delaySamples, bool hq) const noexcept { return hq ? readHermite (delaySamples) : readFrac (delaySamples); }
+
     std::vector<float> buffer;
     int writeIdx = 0;
 };
@@ -56,9 +73,9 @@ public:
     void resize (int maxSamples) { delay.resize (maxSamples); }
     void reset() { delay.reset(); }
 
-    inline float process (float input, float delaySamples, float coeff) noexcept
+    inline float process (float input, float delaySamples, float coeff, bool hq = false) noexcept
     {
-        const float delayed = delay.readFrac (delaySamples);
+        const float delayed = delay.read (delaySamples, hq);
         float v = flushDenormal (input - coeff * delayed);
         v = juce::jlimit (-4.0f, 4.0f, v);
         delay.write (v);
@@ -114,15 +131,21 @@ private:
     float z1 = 0.0f, z2 = 0.0f;
 };
 
-// Two-tap rotating delay pitch shifter with triangular crossfade (taps always sum to unity gain,
-// so it can sit inside a feedback loop without adding energy).
+// Two-grain WSOLA pitch shifter. Hann grains (weights always sum to 1) read a delay line at a
+// rotating offset; whenever a grain restarts, its start point is chosen by cross-correlation
+// with the grain that is currently playing, so the two stay phase-aligned. This removes the
+// warble and comb filtering of a plain delay-line shifter. Safe inside feedback loops.
 class PitchShifter
 {
 public:
-    void prepare (double sampleRate)
+    void prepare (double sampleRate, double windowSeconds = 0.080)
     {
-        window = static_cast<float> (sampleRate * 0.060);
-        delay.resize (static_cast<int> (window) + 16);
+        const double k = sampleRate / 48000.0;
+        window = static_cast<float> (sampleRate * windowSeconds);
+        search = static_cast<int> (window * 0.5f);
+        corrLen = static_cast<int> (768.0 * k);
+        searchStep = std::max (2, static_cast<int> (4.0 * k));
+        delay.resize (static_cast<int> (window) + search + corrLen + 16);
         reset();
     }
 
@@ -130,27 +153,92 @@ public:
     {
         delay.reset();
         phase = 0.0f;
+        offset[0] = offset[1] = 0.0f;
+        last[0] = 0.0f; last[1] = 0.5f;
+        filled = 0;
     }
 
     inline float process (float x, float ratio) noexcept
     {
         delay.write (x);
+        const int size = static_cast<int> (delay.buffer.size());
+        if (filled < size) ++filled;
+
         phase += (1.0f - ratio) / window;
         phase -= std::floor (phase);
 
-        float p2 = phase + 0.5f;
-        if (p2 >= 1.0f) p2 -= 1.0f;
-
-        const float g1 = 1.0f - std::abs (2.0f * phase - 1.0f);
-        const float g2 = 1.0f - std::abs (2.0f * p2 - 1.0f);
-        return delay.readFrac (2.0f + phase * window) * g1
-             + delay.readFrac (2.0f + p2 * window) * g2;
+        float out = 0.0f;
+        for (int k = 0; k < 2; ++k)
+        {
+            float p = phase + 0.5f * static_cast<float> (k);
+            if (p >= 1.0f) p -= 1.0f;
+            if (std::abs (p - last[k]) > 0.5f)
+                offset[k] = findOffset (k, p);
+            last[k] = p;
+            const float s = std::sin (juce::MathConstants<float>::pi * p);
+            out += s * s * delay.readFrac (2.0f + offset[k] + p * window);
+        }
+        return out;
     }
 
 private:
+    inline float at (int d) const noexcept    // d = 1 is the newest sample
+    {
+        const int size = static_cast<int> (delay.buffer.size());
+        int i = delay.writeIdx - d;
+        while (i < 0) i += size;
+        return delay.buffer[static_cast<size_t> (i)];
+    }
+
+    float findOffset (int k, float p) const noexcept
+    {
+        if (filled < static_cast<int> (delay.buffer.size()))
+            return 0.0f;
+        const int o = 1 - k;
+        float po = phase + 0.5f * static_cast<float> (o);
+        if (po >= 1.0f) po -= 1.0f;
+        const int refD = static_cast<int> (2.0f + offset[o] + po * window);
+        const int baseD = static_cast<int> (2.0f + p * window);
+        float best = -1.0e30f;
+        int bestC = 0;
+        for (int c = 0; c < search; c += searchStep)
+        {
+            float acc = 0.0f;
+            for (int i = 0; i < corrLen; i += 2)
+                acc += at (baseD + c + i) * at (refD + i);
+            if (acc > best) { best = acc; bestC = c; }
+        }
+        return static_cast<float> (bestC);
+    }
+
     DelayLine delay;
-    float window = 2880.0f;
-    float phase = 0.0f;
+    float window = 3840.0f, phase = 0.0f;
+    float offset[2] {}, last[2] {};
+    int search = 1920, corrLen = 768, searchStep = 4, filled = 0;
+};
+
+// Detects note starts from the ratio of a fast and a slow envelope, so it works at any input level.
+struct OnsetDetector
+{
+    void prepare (double sr)
+    {
+        const auto c = [sr] (double t) { return static_cast<float> (1.0 - std::exp (-1.0 / (t * sr))); };
+        fastA = c (0.002); fastR = c (0.040); slowA = c (0.060); slowR = c (0.350);
+        fast = slow = 0.0f; armed = true;
+    }
+
+    // returns true on the sample where a new onset is detected
+    inline bool process (float level) noexcept
+    {
+        fast += (level > fast ? fastA : fastR) * (level - fast);
+        slow += (level > slow ? slowA : slowR) * (level - slow);
+        if (armed && fast > 0.0025f && fast > slow * 1.9f) { armed = false; return true; }
+        if (! armed && fast < slow * 1.15f) armed = true;
+        return false;
+    }
+
+    float fast = 0.0f, slow = 0.0f, fastA = 0.0f, fastR = 0.0f, slowA = 0.0f, slowR = 0.0f;
+    bool armed = true;
 };
 
 // Simple per-sample linear smoother that is cheap enough to run on many values

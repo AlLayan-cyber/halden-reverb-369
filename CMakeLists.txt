@@ -3,9 +3,15 @@ cmake_minimum_required(VERSION 3.22)
 if(APPLE)
     set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Build Universal Binary on macOS")
     set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS deployment target")
+
+    juce_add_console_app(FxLab PRODUCT_NAME "FxLab")
+    target_sources(FxLab PRIVATE Tests/FxLab.cpp)
+    target_include_directories(FxLab PRIVATE Source ${CMAKE_CURRENT_BINARY_DIR}/HaldenReverb369_artefacts/JuceLibraryCode)
+    target_compile_definitions(FxLab PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(FxLab PRIVATE HaldenReverb369 juce::juce_audio_utils juce::juce_dsp juce::juce_recommended_config_flags)
 endif()
 
-project(HaldenReverb369 VERSION 1.0.0)
+project(HaldenReverb369 VERSION 1.0.1)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -75,4 +81,10 @@ if(HALDEN_BUILD_TESTS)
     target_compile_definitions(HaldenTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
     target_link_libraries(HaldenTests PRIVATE HaldenReverb369 juce::juce_audio_utils juce::juce_dsp
                           juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+
+    juce_add_console_app(FxLab PRODUCT_NAME "FxLab")
+    target_sources(FxLab PRIVATE Tests/FxLab.cpp)
+    target_include_directories(FxLab PRIVATE Source ${CMAKE_CURRENT_BINARY_DIR}/HaldenReverb369_artefacts/JuceLibraryCode)
+    target_compile_definitions(FxLab PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(FxLab PRIVATE HaldenReverb369 juce::juce_audio_utils juce::juce_dsp juce::juce_recommended_config_flags)
 endif()
