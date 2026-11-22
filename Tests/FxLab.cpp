@@ -36,6 +36,17 @@ int main (int argc, char** argv)
         else setP (a.upToFirstOccurrenceOf ("=", false, false), a.fromFirstOccurrenceOf ("=", false, false).getFloatValue());
     }
 
+    // input "file:<path>" processes a WAV file instead of a generated signal
+    juce::AudioBuffer<float> fileBuf;
+    if (input.startsWith ("file:"))
+    {
+        juce::AudioFormatManager fm; fm.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (juce::File (input.substring (5))));
+        if (r == nullptr) { std::printf ("cannot read %s\n", input.substring (5).toRawUTF8()); return 3; }
+        fileBuf.setSize (2, (int) r->lengthInSamples);
+        r->read (&fileBuf, 0, (int) r->lengthInSamples, 0, true, true);
+    }
+
     p.prepareToPlay (sr, block);
     const int N = (int) (sr * secs);
     juce::AudioBuffer<float> all (2, N), b (2, block);
@@ -80,6 +91,14 @@ int main (int argc, char** argv)
             }
             else if (input == "pulses") { const double ph = std::fmod (t, 0.5); x = ph < 0.08 ? (float) std::sin (juce::MathConstants<double>::twoPi * 330.0 * t) * (1.0f - (float) ph / 0.08f) : 0.0f; }
             x *= level;
+            if (fileBuf.getNumSamples() > 0)
+            {
+                const int k = pos + i;
+                const bool in = k < fileBuf.getNumSamples();
+                b.setSample (0, i, in ? fileBuf.getSample (0, k) * level : 0.0f);
+                b.setSample (1, i, in ? fileBuf.getSample (1, k) * level : 0.0f);
+                continue;
+            }
             b.setSample (0, i, x); b.setSample (1, i, x);
         }
         p.processBlock (b, m);

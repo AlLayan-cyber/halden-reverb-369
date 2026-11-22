@@ -40,7 +40,7 @@ void setStyle (juce::Component& c, const char* style) { c.getProperties().set ("
 
 juce::String hui::formatValue (const juce::String& id, float v)
 {
-    if (id == "preDelayMs" || id == "gateRelease") return juce::String (v, v < 10.0f && id == "preDelayMs" ? 1 : 0) + " ms";
+    if (id == "preDelayMs") return juce::String (v, v < 10.0f && id == "preDelayMs" ? 1 : 0) + " ms";
     if (id == "decay")      return juce::String (v, v < 10.0f ? 2 : 1) + " s";
     if (id == "freezeFade") return juce::String (v, 2) + " s";
     if (id == "highCutHz" || id == "crossoverHz" || id == "eqLowCutHz" || id == "eqHighCutHz" || id == "monoHz") return hz (v);
@@ -95,8 +95,38 @@ void hui::LookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b,
     auto r = b.getLocalBounds().toFloat().reduced (0.5f);
     const bool on = b.getToggleState();
 
-    if (style == "scale" || style == "text")
+    if (style == "scale" || style == "text" || style == "reset" || style == "spaceText")
         return;
+
+    if (style == "spaceBtn" || style == "spaceGo" || style == "spaceToggle")
+    {
+        const float rr = r.getHeight() * (style == "spaceGo" ? 0.5f : 0.3f);
+        const bool lit = style == "spaceGo" || on;
+        juce::Colour fill = style == "spaceGo" ? juce::Colour (0xffa78bfa) : (lit ? juce::Colour (0xff3b2a7a) : juce::Colour (0x66120f1d));
+        if (over) fill = fill.brighter (0.12f);
+        if (down) fill = fill.darker (0.15f);
+        if (lit) { g.setColour (juce::Colour (0x338b5cf6)); g.drawRoundedRectangle (r.expanded (2.0f), rr + 2.0f, 4.0f); }
+        g.setColour (fill);
+        g.fillRoundedRectangle (r, rr);
+        const float progress = static_cast<float> (static_cast<double> (b.getProperties().getWithDefault ("progress", 0.0)));
+        if (style == "spaceGo" && progress > 0.0f)
+        {
+            g.setColour (juce::Colour (0xff6d28d9));
+            g.fillRoundedRectangle (r.withWidth (std::max (r.getHeight(), r.getWidth() * progress)), rr);
+        }
+        g.setColour (lit ? juce::Colour (0xffc4b5fd) : juce::Colour (0xff2e2652));
+        g.drawRoundedRectangle (r.reduced (0.5f), rr, 1.0f);
+        return;
+    }
+
+    if (style == "spaceEntry")
+    {
+        g.setColour (on ? juce::Colour (0xff2a1f5c) : juce::Colour (0xff17112c));
+        g.fillRoundedRectangle (r, 4.0f);
+        g.setColour (on ? juce::Colour (0xffc4b5fd) : juce::Colour (0xff6d5bb8));
+        g.drawRoundedRectangle (r, 4.0f, 1.0f);
+        return;
+    }
 
     if (style == "tab")
     {
@@ -124,6 +154,26 @@ void hui::LookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& b, b
 
     if (style == "scale") c = on ? col::textMid : col::textDim.brighter (over ? 0.3f : 0.0f);
     if (style == "tab")   c = col::blue;
+    if (style == "reset") c = over ? col::textMid : col::textDim;
+    if (style == "spaceBtn" || style == "spaceToggle") c = on ? juce::Colour (0xfff3efff) : juce::Colour (0xff9a90c8);
+    if (style == "spaceGo") c = juce::Colour (0xff1a1033);
+    if (style == "spaceText") c = over ? juce::Colour (0xfff3efff) : juce::Colour (0xffb7acdf);
+    if (style == "spaceEntry") c = on ? juce::Colour (0xfff3efff) : juce::Colour (0xffc4b5fd);
+
+    if (style == "spaceBtn" || style == "spaceGo" || style == "spaceToggle" || style == "spaceText")
+    {
+        g.setColour (c);
+        g.setFont (font (style == "spaceText" ? 22.0f : std::min (15.0f, static_cast<float> (b.getHeight()) * 0.45f)));
+        g.drawText (b.getButtonText(), b.getLocalBounds(), juce::Justification::centred);
+        return;
+    }
+    if (style == "reset" || style == "spaceEntry")
+    {
+        g.setColour (c);
+        g.setFont (font (style == "reset" ? 11.0f : 11.0f));
+        g.drawText (b.getButtonText(), b.getLocalBounds(), juce::Justification::centred);
+        return;
+    }
 
     g.setColour (c);
     const float size = style == "algo" ? 13.0f : style == "scale" ? 11.0f : style == "tab" ? 13.0f : 11.0f;
@@ -336,12 +386,25 @@ void ChoiceRow::paint (juce::Graphics& g)
     {
         juce::Rectangle<float> r (static_cast<float> (i) * (w + 4.0f), 0.0f, w, static_cast<float> (getHeight()));
         const bool sel = i == current;
+        auto text = choices[i].toUpperCase().replace ("-", juce::String (juce::CharPointer_UTF8 ("\xe2\x88\x92")));
+        if (violet)
+        {
+            const float rr = r.getHeight() * 0.3f;
+            g.setColour (sel ? juce::Colour (0xff3b2a7a) : juce::Colour (0x66120f1d));
+            g.fillRoundedRectangle (r, rr);
+            if (sel) { g.setColour (juce::Colour (0x338b5cf6)); g.drawRoundedRectangle (r.expanded (1.5f), rr + 1.5f, 3.0f); }
+            g.setColour (sel ? juce::Colour (0xffa78bfa) : juce::Colour (0xff2e2652));
+            g.drawRoundedRectangle (r.reduced (0.5f), rr, 1.0f);
+            g.setColour (sel ? juce::Colour (0xfff3efff) : juce::Colour (0xff9a90c8));
+            g.setFont (font (std::min (14.0f, r.getHeight() * 0.45f)));
+            g.drawText (text, r, juce::Justification::centred);
+            continue;
+        }
         g.setColour (sel ? (active ? juce::Colour (0xff12305e) : juce::Colour (0xff1a1d23)) : juce::Colour (0xff0b0c0f));
         g.fillRoundedRectangle (r, 3.0f);
         g.setColour (sel ? (active ? col::blueDeep : col::textDim) : col::line);
         g.drawRoundedRectangle (r.reduced (0.5f), 3.0f, 1.0f);
         g.setColour (sel ? (active ? col::blueBright : col::textMid) : col::textDim);
-        auto text = choices[i].replace ("-", juce::String (juce::CharPointer_UTF8 ("\xe2\x88\x92")));
         g.drawText (text, r, juce::Justification::centred);
     }
 }
@@ -524,8 +587,10 @@ void Lcd::paint (juce::Graphics& g)
         const float eqA = eqOn ? 0.9f : eqTouchA * 0.6f;
         if (eqA > 0.01f)
         {
-            const float lo = st.getRawParameterValue ("eqLowCutHz")->load();
-            const float hi = st.getRawParameterValue ("eqHighCutHz")->load();
+            if (! eqSnapped && now - eqTouch >= 1.0) { snapEq(); eqSnapped = true; }
+            const bool liveEq = eqTouchA <= 0.01f;   // EQ just switched on, nothing touched: follow the knobs
+            const float lo = liveEq ? st.getRawParameterValue ("eqLowCutHz")->load() : snapLo;
+            const float hi = liveEq ? st.getRawParameterValue ("eqHighCutHz")->load() : snapHi;
             juce::Path eq;
             for (int i = 0; i <= 120; ++i)
             {
@@ -548,13 +613,12 @@ void Lcd::paint (juce::Graphics& g)
     const float envA = overlayAlpha (envStart, envTouch);
     if (envA > 0.01f)
     {
-        g.setColour (col::lcdBg.withAlpha (0.72f * envA));
+        // cover the moving spectrum completely so nothing jitters under the curve
+        g.setColour (col::lcdBg.withAlpha (0.97f * envA));
         g.fillRect (a.expanded (2.0f));
 
-        const float decay = st.getRawParameterValue ("decay")->load();
-        const float pre = st.getRawParameterValue ("preDelayMs")->load();
-        const float shape = st.getRawParameterValue ("shape")->load();
-        const float size = st.getRawParameterValue ("size")->load();
+        if (! envSnapped && now - envTouch >= 1.0) { snapEnvelope(); envSnapped = true; }
+        const float decay = snapDecay, pre = snapPre, shape = snapShape, size = snapSize;
         const float maxSec = std::max (2.0f, decay * 1.25f + pre * 0.001f);
         const float preX = a.getX() + (pre * 0.001f / maxSec) * a.getWidth();
         const float bloomSec = 0.02f + shape * 0.12f + size * 0.05f;
@@ -596,7 +660,9 @@ void Lcd::paint (juce::Graphics& g)
     if (on ("freezeOn")) fx.add ("FREEZE");
     if (on ("riserOn"))  fx.add ("RISER");
     if (on ("monoOn"))   fx.add ("MONO BASS");
-    if (on ("gateOn"))   fx.add ("GATE");
+    const float orbitNow = proc.spaceOrbitNow.load();
+    if (orbitNow > 0.0f)
+        fx.insert (0, "IN SPACE " + juce::String (juce::roundToInt (orbitNow * 100.0f)) + " %");
     if (! fx.isEmpty())
     {
         g.setColour (col::blueDeep);
@@ -606,12 +672,27 @@ void Lcd::paint (juce::Graphics& g)
     }
 }
 
+void Lcd::snapEnvelope()
+{
+    const auto& st = proc.apvts;
+    snapDecay = st.getRawParameterValue ("decay")->load();
+    snapPre = st.getRawParameterValue ("preDelayMs")->load();
+    snapShape = st.getRawParameterValue ("shape")->load();
+    snapSize = st.getRawParameterValue ("size")->load();
+}
+
+void Lcd::snapEq()
+{
+    snapLo = proc.apvts.getRawParameterValue ("eqLowCutHz")->load();
+    snapHi = proc.apvts.getRawParameterValue ("eqHighCutHz")->load();
+}
+
 float Lcd::overlayAlpha (double start, double touch) const
 {
     const double sinceStart = now - start, sinceTouch = now - touch;
     if (sinceTouch < 0.0 || sinceStart < 0.0) return 0.0f;
     const float fadeIn = static_cast<float> (juce::jlimit (0.0, 1.0, sinceStart / 0.15));
-    const float fadeOut = sinceTouch < 1.4 ? 1.0f : std::max (0.0f, 1.0f - static_cast<float> ((sinceTouch - 1.4) / 0.4));
+    const float fadeOut = sinceTouch < 2.4 ? 1.0f : std::max (0.0f, 1.0f - static_cast<float> ((sinceTouch - 2.4) / 0.4));
     return std::min (fadeIn, fadeOut);
 }
 
@@ -632,7 +713,7 @@ void Lcd::paintHaalAi (juce::Graphics& g, juce::Rectangle<float> a)
 
     const float refY = a.getY() + a.getHeight() * 0.42f;
     const float pxPerDb = 4.0f;
-    const auto curveDb = [&] (float f)
+    const auto voiceCurveDb = [&] (float f)
     {
         float d = 2.0f * hp.magnitudeDb (f, sr) + shelf.magnitudeDb (f, sr) + light.magnitudeDb (f, sr);
         for (int b = 0; b < nStatic; ++b) d += bands[(size_t) b].magnitudeDb (f, sr);
@@ -646,7 +727,7 @@ void Lcd::paintHaalAi (juce::Graphics& g, juce::Rectangle<float> a)
     for (int i = 0; i <= 160; ++i)
     {
         const float f = 20.0f * std::pow (1000.0f, static_cast<float> (i) / 160.0f);
-        const float y = refY - curveDb (f) * pxPerDb;
+        const float y = refY - voiceCurveDb (f) * pxPerDb;
         if (i == 0) curve.startNewSubPath (xForFreq (f), y); else curve.lineTo (xForFreq (f), y);
     }
     juce::Path dashed;
@@ -661,18 +742,18 @@ void Lcd::paintHaalAi (juce::Graphics& g, juce::Rectangle<float> a)
         const float f = proc.haalDynF[(size_t) b].load();
         const float gr = -proc.haalDynG[(size_t) b].load();            // 0..2 dB
         const float x = xForFreq (juce::jlimit (25.0f, 19000.0f, f));
-        const float y = refY - (curveDb (f) - gr) * pxPerDb;
+        const float y = refY - (voiceCurveDb (f) - gr) * pxPerDb;
         const float active = juce::jlimit (0.0f, 1.0f, gr / 2.0f);
-        const auto ring = col::iceBlue.interpolatedWith (col::amber, active);
+        const auto ringCol = col::iceBlue.interpolatedWith (col::amber, active);
 
         if (active > 0.05f)
         {
-            g.setColour (ring.withAlpha (0.25f * active));
+            g.setColour (ringCol.withAlpha (0.25f * active));
             g.fillEllipse (x - 15.0f, y - 15.0f, 30.0f, 30.0f);
         }
         g.setColour (col::lcdBg);
         g.fillEllipse (x - 11.0f, y - 11.0f, 22.0f, 22.0f);
-        g.setColour (ring);
+        g.setColour (ringCol);
         g.drawEllipse (x - 11.0f, y - 11.0f, 22.0f, 22.0f, 1.6f);
         g.setFont (font (10.5f, true));
         g.drawText ("D" + juce::String (b + 1), juce::Rectangle<float> (x - 11.0f, y - 11.0f, 22.0f, 22.0f), juce::Justification::centred);
@@ -681,7 +762,7 @@ void Lcd::paintHaalAi (juce::Graphics& g, juce::Rectangle<float> a)
         const juce::Rectangle<float> meter (x - 3.0f, y + 15.0f, 6.0f, 22.0f);
         g.setColour (juce::Colour (0xff0f2340));
         g.fillRoundedRectangle (meter, 2.0f);
-        g.setColour (ring);
+        g.setColour (ringCol);
         g.fillRoundedRectangle (meter.withTop (meter.getBottom() - meter.getHeight() * active), 2.0f);
         g.setFont (font (10.0f));
         g.drawText (gr > 0.05f ? juce::String (juce::CharPointer_UTF8 ("\xe2\x88\x92")) + juce::String (gr, 1) : juce::String ("0.0"),
@@ -705,6 +786,253 @@ void Lcd::paintHaalAi (juce::Graphics& g, juce::Rectangle<float> a)
         g.setColour (juce::Colour (0xffe8d9a8));
         g.drawText ("VOICE CURVE  - - -     D1 D2 D3  max 2 dB", juce::Rectangle<float> (a.getX() + 4.0f, a.getY() + 4.0f, 330.0f, 14.0f), juce::Justification::centredLeft);
     }
+}
+
+// =========================================================================== IN SPACE: glass knob
+namespace
+{
+const juce::Colour vLight { 0xffc4b5fd }, vMid { 0xffa78bfa }, vDeep { 0xff8b5cf6 }, vText { 0xfff3efff }, vDim { 0xff9a90c8 };
+}
+
+GlassKnob::GlassKnob (juce::AudioProcessorValueTreeState& s, const juce::String& id, const juce::String& l, float r, bool isBig)
+    : paramId (id), label (l), radius (r), big (isBig)
+{
+    slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+    slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    slider.setRotaryParameters (kStartAngle, kEndAngle, true);
+    slider.setMouseDragSensitivity (big ? 320 : 220);
+    addAndMakeVisible (slider);
+    attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (s, id, slider);
+    if (auto* p = s.getParameter (id))
+        slider.setDoubleClickReturnValue (true, p->convertFrom0to1 (p->getDefaultValue()));
+    slider.onValueChange = [this] { repaint(); };
+}
+
+void GlassKnob::resized()
+{
+    const int d = juce::roundToInt (radius * 2.0f + 30.0f);
+    slider.setBounds (juce::Rectangle<int> (d, d).withCentre (getLocalBounds().getCentre()));
+}
+
+void GlassKnob::paint (juce::Graphics& g)
+{
+    const auto c = getLocalBounds().toFloat().getCentre();
+    const float r = radius, R = r + (big ? 18.0f : 11.0f);
+    float v = static_cast<float> (slider.valueToProportionOfLength (slider.getValue()));
+    if (liveValue) v = liveValue();
+    const float a = kStartAngle + v * (kEndAngle - kStartAngle);
+    const auto pt = [&] (float ang, float rad) { return juce::Point<float> (c.x + rad * std::sin (ang), c.y - rad * std::cos (ang)); };
+
+    // label above, value below
+    g.setColour (juce::Colour (0xffd6d0f0));
+    g.setFont (font (big ? 17.0f : 14.0f));
+    juce::String spaced;
+    for (auto ch : label) { spaced << juce::String::charToString (ch) << (big ? "  " : " "); }
+    g.drawText (spaced.trimEnd(), juce::Rectangle<float> (0.0f, c.y - R - (big ? 40.0f : 34.0f), static_cast<float> (getWidth()), 22.0f), juce::Justification::centred);
+
+    // remaining scale: fine dots
+    g.setColour (juce::Colour (0xff6d5bb8));
+    const float span = kEndAngle - a;
+    const int dots = static_cast<int> (span * R / 7.0f);
+    for (int i = 1; i <= dots; ++i)
+    {
+        const auto p = pt (a + span * static_cast<float> (i) / static_cast<float> (dots), R);
+        g.fillEllipse (p.x - 1.1f, p.y - 1.1f, 2.2f, 2.2f);
+    }
+
+    // value arc with a soft glow
+    if (v > 0.002f)
+    {
+        juce::Path arc;
+        arc.addCentredArc (c.x, c.y, R, R, 0.0f, kStartAngle, a, true);
+        const float w = big ? 5.0f : 3.5f;
+        for (auto [width, alpha] : { std::pair<float, float> { w * 5.0f, 0.06f }, { w * 3.2f, 0.10f }, { w * 2.0f, 0.18f } })
+        {
+            g.setColour (vDeep.withAlpha (alpha));
+            g.strokePath (arc, juce::PathStrokeType (width, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        }
+        g.setGradientFill (juce::ColourGradient (vDeep, pt (kStartAngle, R), vLight, pt (a, R), false));
+        g.strokePath (arc, juce::PathStrokeType (w, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    }
+
+    // shadow, glass body, rim
+    g.setColour (juce::Colours::black.withAlpha (0.55f));
+    g.fillEllipse (c.x - r * 1.02f, c.y - r + r * 0.12f, r * 2.04f, r * 2.04f);
+    {
+        juce::ColourGradient body (juce::Colour (0xff3a3158), c.x - r * 0.35f, c.y - r * 0.45f, juce::Colour (0xff07060d), c.x + r * 0.6f, c.y + r * 0.9f, true);
+        body.addColour (0.55, juce::Colour (0xff17132a));
+        g.setGradientFill (body);
+        g.fillEllipse (c.x - r, c.y - r, r * 2.0f, r * 2.0f);
+    }
+    g.setColour (vDeep.withAlpha (0.06f + 0.22f * v));   // inner light grows with the value
+    g.fillEllipse (c.x - r * 0.8f, c.y - r * 0.8f, r * 1.6f, r * 1.6f);
+    g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (0.45f), c.x, c.y - r, juce::Colour (0xff2a2347).withAlpha (0.6f), c.x, c.y + r, false));
+    g.drawEllipse (c.x - r, c.y - r, r * 2.0f, r * 2.0f, big ? 1.6f : 1.2f);
+    {
+        juce::Graphics::ScopedSaveState ss (g);
+        juce::Path clip; clip.addEllipse (c.x - r, c.y - r, r * 2.0f, r * 2.0f);
+        g.reduceClipRegion (clip);
+        g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (0.32f), c.x, c.y - r, juce::Colours::white.withAlpha (0.0f), c.x, c.y - r * 0.05f, false));
+        g.fillEllipse (c.x - r * 0.78f, c.y - r * 0.98f, r * 1.56f, r * 0.95f);
+        g.setColour (juce::Colours::white.withAlpha (0.10f));       // reflection at the lower right
+        juce::Path refl; refl.addCentredArc (c.x, c.y, r * 0.82f, r * 0.82f, 0.0f, 2.0f, 2.9f, true);
+        g.strokePath (refl, juce::PathStrokeType (r * 0.12f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    }
+
+    // pointer from the centre
+    const auto p0 = pt (a, r * 0.06f), p1 = pt (a, r * 0.62f);
+    g.setColour (vDeep.withAlpha (0.35f));
+    g.drawLine ({ p0, p1 }, big ? 9.0f : 6.0f);
+    g.setColour (vLight);
+    g.drawLine ({ p0, p1 }, big ? 4.0f : 3.0f);
+
+    // the "satellite" at the end of the arc
+    const auto h = pt (a, R);
+    const float hb = big ? 8.0f : 5.0f;
+    g.setColour (vMid.withAlpha (0.25f));
+    g.fillEllipse (h.x - hb * 2.0f, h.y - hb * 2.0f, hb * 4.0f, hb * 4.0f);
+    g.setGradientFill (juce::ColourGradient (juce::Colours::white, h.x - hb * 0.4f, h.y - hb * 0.4f, vLight, h.x + hb, h.y + hb, true));
+    g.fillEllipse (h.x - hb, h.y - hb, hb * 2.0f, hb * 2.0f);
+
+    // hints at the ends and the value
+    if (lowHint.isNotEmpty())
+    {
+        g.setColour (vDim);
+        g.setFont (font (15.0f));
+        const auto lo = pt (kStartAngle, R + 26.0f), hi = pt (kEndAngle, R + 26.0f);
+        g.drawText (lowHint, juce::Rectangle<float> (lo.x - 50.0f, lo.y - 4.0f, 70.0f, 20.0f), juce::Justification::centred);
+        g.drawText (highHint, juce::Rectangle<float> (hi.x - 20.0f, hi.y - 4.0f, 70.0f, 20.0f), juce::Justification::centred);
+    }
+    g.setColour (vText);
+    g.setFont (font (big ? 30.0f : 17.0f));
+    const juce::String text = paramId == "orbit" ? juce::String (juce::roundToInt (v * 100.0f)) + " %"
+                            : paramId == "spaceDecay" ? juce::String (slider.getValue(), 1) + " s"
+                            : juce::String (juce::roundToInt (slider.getValue() * 100.0)) + " %";
+    g.drawText (text, juce::Rectangle<float> (0.0f, c.y + R + (big ? 12.0f : 10.0f), static_cast<float> (getWidth()), big ? 36.0f : 22.0f), juce::Justification::centred);
+}
+
+// =========================================================================== IN SPACE: window
+SpaceWindow::SpaceWindow (HaldenReverbAudioProcessor& p)
+    : proc (p),
+      orbit (p.apvts, "orbit", "ORBIT", 82.0f, true),
+      size (p.apvts, "spaceSize", "SIZE", 36.0f, false),
+      decay (p.apvts, "spaceDecay", "DECAY", 36.0f, false),
+      launch (p.apvts, "launchBars"),
+      routing (p.apvts, "routing")
+{
+    orbit.lowHint = "ground";
+    orbit.highHint = "orbit";
+    orbit.liveValue = [this] { return proc.spaceLaunchProgress.load() > 0.0f ? proc.spaceOrbitNow.load()
+                                                                            : static_cast<float> (orbit.slider.valueToProportionOfLength (orbit.slider.getValue())); };
+    launch.violet = routing.violet = true;
+
+    go.setButtonText ("GO");
+    go.getProperties().set ("style", "spaceGo");
+    go.setTooltip ("ORBIT rises to 100 % over the chosen bars, then drops. Press again to stop.");
+    go.onClick = [this] { proc.spaceGoRequest.store (true); };
+
+    stardust.setButtonText ("STARDUST +12");
+    stardust.setClickingTogglesState (true);
+    stardust.getProperties().set ("style", "spaceToggle");
+    stardust.setTooltip ("An octave-up shimmer that blooms near the top of ORBIT");
+    stardustAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (p.apvts, "stardust", stardust);
+
+    close.setButtonText (juce::String (juce::CharPointer_UTF8 ("\xe2\x9c\x95")));
+    close.getProperties().set ("style", "spaceText");
+    close.onClick = [this] { if (onClose) onClose(); };
+
+    for (juce::Component* c : { (juce::Component*) &orbit, (juce::Component*) &size, (juce::Component*) &decay, (juce::Component*) &launch,
+                                (juce::Component*) &routing, (juce::Component*) &go, (juce::Component*) &stardust, (juce::Component*) &close })
+        addAndMakeVisible (c);
+}
+
+void SpaceWindow::resized()
+{
+    const int w = getWidth(), h = getHeight();
+    close.setBounds (w - 52, 12, 40, 34);
+    orbit.setBounds (w / 2 - 170, 40, 340, 330);
+    size.setBounds (110, 120, 160, 190);
+    decay.setBounds (w - 270, 120, 160, 190);
+    routing.setBounds (30, h - 64, 170, 38);
+    launch.setBounds (w / 2 - 190, h - 64, 260, 38);
+    go.setBounds (w / 2 + 86, h - 66, 96, 42);
+    stardust.setBounds (w - 210, h - 64, 180, 38);
+}
+
+void SpaceWindow::refresh()
+{
+    const float pr = proc.spaceLaunchProgress.load();
+    const float ob = proc.spaceOrbitNow.load();
+    if (std::abs (pr - lastProgress) > 0.002f || std::abs (ob - lastOrbit) > 0.002f)
+    {
+        go.getProperties().set ("progress", pr);
+        go.setButtonText (pr > 0.0f ? "STOP" : "GO");
+        go.repaint();
+        orbit.repaint();
+        lastProgress = pr;
+        lastOrbit = ob;
+    }
+}
+
+void SpaceWindow::paint (juce::Graphics& g)
+{
+    const auto b = getLocalBounds().toFloat();
+    const float rr = 20.0f;
+
+    g.setColour (juce::Colours::black.withAlpha (0.55f));   // drop shadow onto the panel
+    g.fillRoundedRectangle (b.translated (0.0f, 6.0f), rr);
+
+    juce::Path shape;
+    shape.addRoundedRectangle (b, rr);
+    {
+        juce::Graphics::ScopedSaveState ss (g);
+        g.reduceClipRegion (shape);
+        juce::ColourGradient bg (juce::Colour (0xff1d1636), b.getX(), b.getY(), juce::Colour (0xff120d24), b.getRight(), b.getBottom(), false);
+        bg.addColour (0.5, juce::Colour (0xff0b0915));
+        g.setGradientFill (bg);
+        g.fillRect (b);
+
+        // diagonal light streaks, like light catching a glass panel
+        const auto streak = [&] (float x0, float width, float alpha)
+        {
+            juce::Path p;
+            p.startNewSubPath (x0, b.getBottom());
+            p.lineTo (x0 + width, b.getBottom());
+            p.lineTo (x0 + width + b.getHeight() * 0.62f, b.getY());
+            p.lineTo (x0 + b.getHeight() * 0.62f, b.getY());
+            p.closeSubPath();
+            juce::ColourGradient gr (vDeep.withAlpha (0.0f), x0, 0.0f, vDeep.withAlpha (0.0f), x0 + width, 0.0f, false);
+            gr.addColour (0.5, vMid.withAlpha (alpha));
+            g.setGradientFill (gr);
+            g.fillPath (p);
+        };
+        streak (b.getX() - 120.0f, 180.0f, 0.16f);
+        streak (b.getX() + 10.0f, 40.0f, 0.10f);
+        streak (b.getRight() - 330.0f, 120.0f, 0.13f);
+        streak (b.getRight() - 160.0f, 30.0f, 0.09f);
+
+        // faint stars
+        juce::Random rnd (369);
+        for (int i = 0; i < 70; ++i)
+        {
+            const float x = rnd.nextFloat() * b.getWidth(), y = rnd.nextFloat() * b.getHeight();
+            g.setColour (juce::Colour (0xffd8ccff).withAlpha (0.10f + 0.35f * rnd.nextFloat()));
+            const float d = 0.8f + rnd.nextFloat() * 1.2f;
+            g.fillEllipse (x, y, d, d);
+        }
+        // top sheen
+        g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (0.06f), 0.0f, b.getY(), juce::Colours::white.withAlpha (0.0f), 0.0f, b.getY() + 90.0f, false));
+        g.fillRect (b.withHeight (90.0f));
+    }
+    g.setGradientFill (juce::ColourGradient (juce::Colours::white.withAlpha (0.30f), b.getX(), b.getY(), vDeep.withAlpha (0.35f), b.getRight(), b.getBottom(), false));
+    g.strokePath (shape, juce::PathStrokeType (1.4f));
+
+    g.setColour (juce::Colour (0xffe9e3ff));
+    g.setFont (font (22.0f));
+    g.drawText ("I  N     S  P  A  C  E", juce::Rectangle<float> (34.0f, 20.0f, 360.0f, 30.0f), juce::Justification::centredLeft);
+    g.setColour (vDim);
+    g.setFont (font (12.0f));
+    g.drawText ("LAUNCH", juce::Rectangle<float> (b.getCentreX() - 190.0f, b.getBottom() - 86.0f, 260.0f, 16.0f), juce::Justification::centred);
 }
 
 // =========================================================================== FX module
@@ -889,6 +1217,31 @@ HaldenReverbAudioProcessorEditor::HaldenReverbAudioProcessorEditor (HaldenReverb
     rackTab.onClick = [this] { rackOpen = ! rackOpen; setUiProp (idRack, rackOpen); applyWindowSize(); };
     content.addAndMakeVisible (rackTab);
 
+    // MIX shows SEND when the plug-in sits on a bus
+    mixKnob = mainKnobs.back().get();
+    mixKnob->valueOverride = [this]() -> juce::String
+    {
+        return proc.apvts.getRawParameterValue ("routing")->load() >= 0.5f ? juce::String ("SEND 100 %") : juce::String();
+    };
+    routingRow = std::make_unique<hui::ChoiceRow> (p.apvts, "routing");
+    content.addAndMakeVisible (*routingRow);
+
+    // IN SPACE entry under HaalAi, and a quiet "reset" above it
+    spaceButton.setButtonText ("IN SPACE");
+    setStyle (spaceButton, "spaceEntry");
+    spaceButton.onClick = [this] { setSpaceOpen (spaceWindow == nullptr || ! spaceWindow->isVisible()); };
+    content.addAndMakeVisible (spaceButton);
+
+    resetButton.setButtonText ("reset");
+    setStyle (resetButton, "reset");
+    resetButton.setTooltip ("All controls back to how the plug-in opens");
+    resetButton.onClick = [this] { proc.resetAllToDefaults(); };
+    content.addAndMakeVisible (resetButton);
+
+    spaceWindow = std::make_unique<hui::SpaceWindow> (p);
+    spaceWindow->onClose = [this] { setSpaceOpen (false); };
+    content.addChildComponent (*spaceWindow);
+
     for (int i = 0; i < 4; ++i)
     {
         auto& b = scaleButtons[static_cast<size_t> (i)];
@@ -911,7 +1264,6 @@ HaldenReverbAudioProcessorEditor::HaldenReverbAudioProcessorEditor (HaldenReverb
         auto& frz  = add ("freezeOn", "FREEZE");      frz.setHint ("infinite hold of the tail");  frz.addKnob ("freezeFade", "FADE");
         auto& ris  = add ("riserOn", "RISER");        ris.setHint ("build-up macro: size, decay, width, air"); ris.addKnob ("riserAmt", "AMOUNT");
         auto& mono = add ("monoOn", "MONO BASS");     mono.setHint ("lows of the tail in mono"); mono.addKnob ("monoHz", "BELOW");
-        auto& gate = add ("gateOn", "GATE");          gate.addChoices ("gateLen");   gate.addKnob ("gateRelease", "RELEASE");
     }
 
     applyWindowSize();
@@ -989,6 +1341,13 @@ void HaldenReverbAudioProcessorEditor::layout()
         x += w + 6;
     }
     learnButton.setBounds (150 + 700 - 96, 100 + 250 - 54, 78, 20);
+    {
+        const auto hb = algoButtons.back()->getBounds();
+        spaceButton.setBounds (hb.getX(), hb.getBottom() + 5, hb.getWidth(), 22);
+        resetButton.setBounds (hb.getX(), 8, hb.getWidth(), 18);
+    }
+    routingRow->setBounds (kMain[4].cx - 46, 540, 92, 17);
+    spaceWindow->setBounds (40, 96, 920, 470);
 
     inFader.setBounds (40, 98, 40, 272);
     inMeter.setBounds (96, 104, 26, 242);
@@ -1105,9 +1464,22 @@ void HaldenReverbAudioProcessorEditor::Content::paint (juce::Graphics& g)
     }
 }
 
+void HaldenReverbAudioProcessorEditor::setSpaceOpen (bool open)
+{
+    spaceWindow->setVisible (open);
+    if (open) spaceWindow->toFront (false);
+    drawerTab.setVisible (! open);
+    spaceButton.setToggleState (open || proc.spaceOrbitNow.load() > 0.0f, juce::dontSendNotification);
+}
+
 void HaldenReverbAudioProcessorEditor::timerCallback()
 {
     const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    const bool spaceLit = spaceWindow->isVisible() || proc.spaceOrbitNow.load() > 0.0f;
+    if (spaceButton.getToggleState() != spaceLit) spaceButton.setToggleState (spaceLit, juce::dontSendNotification);
+    if (spaceWindow->isVisible()) spaceWindow->refresh();
+    const bool send = proc.apvts.getRawParameterValue ("routing")->load() >= 0.5f;
+    if (mixKnob->slider.isEnabled() == send) { mixKnob->slider.setEnabled (! send); mixKnob->setAlpha (send ? 0.55f : 1.0f); }
     inMeter.setLevels (proc.inPeak[0].exchange (0.0f), proc.inPeak[1].exchange (0.0f), now);
     outMeter.setLevels (proc.outPeak[0].exchange (0.0f), proc.outPeak[1].exchange (0.0f), now);
     lcd.update (now);

@@ -246,29 +246,6 @@ static int runDsp()
         const double plain = ratio (false), glide = ratio (true);
         check (std::abs (glide - plain) < 1.5, "Glide does not bend while singing", "440/220 Hz: plain " + juce::String (plain, 1) + " dB, glide " + juce::String (glide, 1) + " dB");
     }
-    { // 10c. Gate opens on quiet material too (-36 dBFS)
-        P p; setP (p, "mix", 1); setP (p, "decay", 4); setP (p, "gateOn", 1); setP (p, "gateLen", 1); setP (p, "gateRelease", 10);
-        auto o = render (p, sr, 2, [&] (int n, int) { const int ph = n % 24000; return ph < 3800 ? 0.016f * std::sin (n * 0.0432f) : 0.0f; });
-        const double open = energy (o.L, (size_t) (1.02 * sr), (size_t) (1.2 * sr)), closed = energy (o.L, (size_t) (1.46 * sr), (size_t) (1.50 * sr));
-        check (open > 1e-6 && 10 * std::log10 (open / 4.5 / (closed + 1e-30)) > 30, "Gate triggers on quiet input", juce::String (10 * std::log10 (open / (closed + 1e-30)), 1) + " dB open/closed");
-    }
-    { // 10d. Gate stays open through a legato phrase
-        P p; setP (p, "mix", 1); setP (p, "decay", 4); setP (p, "gateOn", 1); setP (p, "gateLen", 0); setP (p, "gateRelease", 20);
-        auto o = render (p, sr, 2.5, [&] (int n, int) { const float f = n < 24000 ? 220.0f : n < 48000 ? 277.0f : n < 72000 ? 330.0f : 0.0f; return f > 0 ? 0.3f * std::sin (n * juce::MathConstants<float>::twoPi * f / 48000.0f) : 0.0f; });
-        double minDb = 0;
-        for (double t0 = 0.3; t0 < 1.45; t0 += 0.05)
-        {
-            const double e = energy (o.L, (size_t) (t0 * sr), (size_t) ((t0 + 0.05) * sr)) / (0.05 * sr);
-            minDb = std::min (minDb, 10 * std::log10 (e + 1e-30));
-        }
-        check (minDb > -40.0, "Gate open through legato notes", "quietest 50 ms: " + juce::String (minDb, 1) + " dBFS");
-    }
-    { // 11. Gate closes the tail after length + release
-        P p; setP (p, "mix", 1); setP (p, "decay", 6); setP (p, "gateOn", 1); setP (p, "gateLen", 1); setP (p, "gateRelease", 30);
-        auto o = render (p, sr, 2, [&] (int n, int) { return noiseBurst (n, sr, 0.05f); });
-        const double open = energy (o.L, (size_t) (0.05 * sr), (size_t) (0.2 * sr)) / (0.15 * sr), closed = energy (o.L, (size_t) (0.6 * sr), (size_t) (1.5 * sr)) / (0.9 * sr);
-        check (10 * std::log10 (open / (closed + 1e-30)) > 40, "Gate (1/8 @120bpm) cuts the tail", juce::String (10 * std::log10 (open / (closed + 1e-30)), 1) + " dB down");
-    }
     { // 12. Pump modulates at the tempo (1/4 @120 = 2 Hz)
         P p; setP (p, "mix", 1); setP (p, "decay", 10); setP (p, "pumpOn", 1); setP (p, "pumpDepth", 1);
         auto o = render (p, sr, 4, [&] (int n, int) { return noiseBurst (n, sr, 0.2f); });
@@ -296,7 +273,7 @@ static int runDsp()
         check (p.getTailLengthSeconds() > 60.0, "Tail length follows decay x bass", juce::String (p.getTailLengthSeconds(), 1) + " s");
     }
     { // 15. CPU
-        P p; for (auto* id : { "pumpOn", "shimOn", "riserOn", "monoOn", "gateOn", "eqEnabled" }) setP (p, id, 1); setP (p, "riserAmt", 0.5f);
+        P p; for (auto* id : { "pumpOn", "shimOn", "riserOn", "monoOn", "eqEnabled" }) setP (p, id, 1); setP (p, "riserAmt", 0.5f);
         const auto t0 = juce::Time::getMillisecondCounterHiRes();
         render (p, sr, 20, [&] (int n, int) { return 0.1f * std::sin (n * 0.01f); });
         const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
@@ -391,6 +368,76 @@ static int runDsp()
         check (maxCut >= -2.01f, "D bands never cut more than 2 dB", juce::String (maxCut, 2) + " dB");
     }
 
+    { // 19. IN SPACE: ORBIT 0 leaves the plugin untouched
+        P a, b; setP (a, "algorithm", 2); setP (b, "algorithm", 2); setP (a, "mix", 0.3f); setP (b, "mix", 0.3f); setP (b, "orbit", 0.0f); setP (b, "spaceDecay", 12.0f); setP (b, "stardust", 1);
+        Voice v1 (sr), v2 (sr);
+        auto oa = render (a, sr, 3, [&] (int n, int ch) { static float l = 0; if (ch == 1) return l; l = v1.next (n); return l; });
+        auto ob = render (b, sr, 3, [&] (int n, int ch) { static float l = 0; if (ch == 1) return l; l = v2.next (n); return l; });
+        double diff = 0; for (size_t i = 0; i < oa.L.size(); ++i) diff = std::max (diff, (double) std::abs (oa.L[i] - ob.L[i]));
+        check (diff < 1e-6, "ORBIT 0 = normal reverb", "max diff " + juce::String (diff, 8));
+    }
+    { // 20. IN SPACE low cut follows the measured curve (+-4 dB)
+        struct Pt { float o, f, db; };
+        const Pt pts[] = { { 0.33f, 100, -8.8f }, { 0.33f, 300, -2.9f }, { 0.55f, 100, -18.6f }, { 0.55f, 300, -5.4f }, { 0.55f, 600, -0.7f },
+                           { 0.9f, 600, -42.5f }, { 0.9f, 1000, -24.1f }, { 0.9f, 2000, -6.1f }, { 0.9f, 4000, -0.9f } };
+        bool ok = true; juce::String s;
+        for (const auto& q : pts)
+        {
+            haldendsp::SpaceLowCut c; c.setOrbit (q.o, (float) sr);
+            const float m = c.magnitudeDb (q.f, (float) sr);
+            ok = ok && std::abs (m - q.db) < std::max (4.0f, 0.15f * std::abs (q.db));
+            s << juce::roundToInt (q.o * 100) << "%/" << juce::roundToInt (q.f) << ":" << juce::String (m, 1) << " ";
+        }
+        haldendsp::SpaceLowCut z; z.setOrbit (0.0f, (float) sr);
+        ok = ok && z.magnitudeDb (40.0f, (float) sr) > -0.2f;
+        check (ok, "IN SPACE low cut matches the reference (4 dB/15%)", s);
+    }
+    { // 21. SEND: no dry at all, even with Mix at 0 and ORBIT up
+        P p; setP (p, "routing", 1); setP (p, "mix", 0.0f); setP (p, "orbit", 0.5f);
+        auto o = render (p, sr, 0.5, impulse);
+        check (std::abs (o.L[0]) < 1e-6f && energy (o.L, 100, o.L.size()) > 1e-6, "SEND = 100 % wet", "sample0=" + juce::String (o.L[0], 6));
+    }
+    { // 22. LAUNCH ramps ORBIT to 100 % over 1 bar and drops back
+        P p; setP (p, "launchBars", 0); setP (p, "mix", 0.2f);
+        float atHalf = 0, atEnd = 0, after = 0;
+        render (p, sr, 3.0, [] (int n, int) { return 0.2f * std::sin (n * 0.05f); }, [&] (int pos)
+        {
+            if (pos == 0) p.spaceGoRequest.store (true);
+            const double t = pos / sr;   // 1 bar at 120 bpm = 2 s
+            if (std::abs (t - 1.0) < 0.003) atHalf = p.spaceOrbitNow.load();
+            if (std::abs (t - 1.95) < 0.003) atEnd = p.spaceOrbitNow.load();
+            if (std::abs (t - 2.1) < 0.003) after = p.spaceOrbitNow.load();
+        });
+        check (std::abs (atHalf - 0.5f) < 0.05f && atEnd > 0.95f && after < 0.02f, "LAUNCH 1 bar: ramp up, then drop", juce::String (atHalf, 2) + " -> " + juce::String (atEnd, 2) + " -> " + juce::String (after, 2));
+    }
+    { // 23. IN SPACE at the top with STARDUST stays stable
+        P p; setP (p, "orbit", 1.0f); setP (p, "stardust", 1); setP (p, "spaceDecay", 15.0f); setP (p, "spaceSize", 1.5f);
+        Voice v (sr);
+        auto o = render (p, sr, 25, [&] (int n, int ch) { static float l = 0; if (ch == 1) return l; l = n < sr * 4 ? v.next (n) : 0.0f; return l; });
+        bool fin; const float pk = peakOf (o, fin);
+        const double first = energy (o.L, (size_t) (5 * sr), (size_t) (7 * sr)), last = energy (o.L, (size_t) (22 * sr), (size_t) (24 * sr));
+        check (fin && pk < 3.0f && last < first, "IN SPACE 100 % + STARDUST stable", "peak " + juce::String (pk, 2));
+    }
+
+    { // 24. Ambience loads its own settings, leaving it brings mine back; RESET restores defaults
+        P p; setP (p, "algorithm", 2); setP (p, "decay", 5.0f); setP (p, "size", 1.3f); setP (p, "orbit", 0.4f);
+        const auto pump = [] { juce::MessageManager::getInstance()->runDispatchLoopUntil (60); };
+        const auto val = [&] (const char* id) { return p.apvts.getRawParameterValue (id)->load(); };
+        pump();
+        setP (p, "algorithm", 6); pump();
+        const float ambDecay = val ("decay"), ambSize = val ("size");
+        setP (p, "decay", 1.4f); pump();             // tweak inside Ambience
+        setP (p, "algorithm", 4); pump();            // Room: my settings come back
+        const float backDecay = val ("decay"), backSize = val ("size");
+        check (std::abs (ambDecay - 0.9f) < 0.02f && std::abs (ambSize - 0.55f) < 0.02f && std::abs (backDecay - 5.0f) < 0.02f && std::abs (backSize - 1.3f) < 0.02f,
+               "Ambience defaults, then my settings back", "amb " + juce::String (ambDecay, 2) + "s/" + juce::String (ambSize, 2) + "  back " + juce::String (backDecay, 2) + "s/" + juce::String (backSize, 2));
+        setP (p, "algorithm", 6); pump();
+        check (std::abs (val ("decay") - 0.9f) < 0.02f, "Ambience always starts from its defaults", juce::String (val ("decay"), 2) + " s");
+        setP (p, "algorithm", 2); pump();
+        p.resetAllToDefaults(); pump();
+        check (std::abs (val ("decay") - 3.1f) < 0.02f && val ("orbit") == 0.0f && juce::roundToInt (val ("algorithm")) == 2, "RESET: all controls back to defaults", juce::String (val ("decay"), 2) + " s, orbit " + juce::String (val ("orbit"), 2));
+    }
+
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }
@@ -474,6 +521,18 @@ static int runShots (const juce::String& dir)
         for (int b = 0; b < p.haalNumStatic.load(); ++b)
             std::printf ("static band %d: %.0f Hz %.1f dB Q %.2f\n", b, p.haalStaticF[(size_t) b].load(), p.haalStaticG[(size_t) b].load(), p.haalStaticQ[(size_t) b].load());
         std::printf ("air shelf %.1f dB\n", p.haalShelf.load());
+    }
+    {
+        // IN SPACE window open, ORBIT at 62 %, STARDUST on
+        setP (p, "orbit", 0.62f); setP (p, "stardust", 1); setP (p, "launchBars", 1);
+        std::unique_ptr<juce::AudioProcessorEditor> e (p.createEditor());
+        e->setVisible (true); settle (600);
+        shoot (*e, out.getChildFile ("6_main_with_space_entry.png"));
+        for (auto* c : e->getChildComponent (0)->getChildren())
+            if (auto* b = dynamic_cast<juce::TextButton*> (c))
+                if (b->getButtonText() == "IN SPACE") b->triggerClick();
+        settle (1200);
+        shoot (*e, out.getChildFile ("7_in_space.png"));
     }
     feeder.stopThread (2000);
     return 0;

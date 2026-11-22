@@ -101,6 +101,7 @@ public:
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
     std::function<bool()> isActive;
+    bool violet = false;   // IN SPACE styling
 
 private:
     juce::RangedAudioParameter* param = nullptr;
@@ -118,8 +119,10 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void update (double nowSec);                   // pulls audio and advances the analyser
     // keeps the overlay up for as long as the knob keeps moving (no restart of the fade-in)
-    void showEnvelope (double nowSec) { if (nowSec - envTouch > 2.2) envStart = nowSec; envTouch = nowSec; }
-    void showEq (double nowSec) { if (nowSec - eqTouch > 2.2) eqStart = nowSec; eqTouch = nowSec; }
+    // the picture is taken when the overlay appears and re-taken 1 s after the knob stops,
+    // so it never jitters while a knob is moving
+    void showEnvelope (double nowSec) { if (nowSec - envTouch > 2.8) { envStart = nowSec; snapEnvelope(); } envTouch = nowSec; envSnapped = false; }
+    void showEq (double nowSec) { if (nowSec - eqTouch > 2.8) { eqStart = nowSec; snapEq(); } eqTouch = nowSec; eqSnapped = false; }
 
 private:
     HaldenReverbAudioProcessor& proc;
@@ -135,11 +138,52 @@ private:
     std::array<double, kPoints> peakTime {};
     double envTouch = -100.0, eqTouch = -100.0, envStart = -100.0, eqStart = -100.0, now = 0.0, lastUpdate = 0.0;
     float overlayAlpha (double start, double touch) const;
+    void snapEnvelope();
+    void snapEq();
+    float snapDecay = 3.0f, snapPre = 20.0f, snapShape = 0.4f, snapSize = 0.85f, snapLo = 500.0f, snapHi = 6000.0f;
+    bool envSnapped = true, eqSnapped = true;
     void paintHaalAi (juce::Graphics&, juce::Rectangle<float> area);
 
     float xForFreq (float f) const;
     float yForDb (float db) const;
     juce::Rectangle<float> plotArea() const;
+};
+
+// ------------------------------------------------------------------ IN SPACE glass knob
+class GlassKnob : public juce::Component
+{
+public:
+    GlassKnob (juce::AudioProcessorValueTreeState&, const juce::String& paramId, const juce::String& label, float radius, bool big);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    juce::Slider slider;
+    std::function<float()> liveValue;   // optional 0..1 shown instead of the knob (LAUNCH ramp)
+    juce::String lowHint, highHint;
+
+private:
+    juce::String paramId, label;
+    float radius;
+    bool big;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
+};
+
+// ------------------------------------------------------------------ IN SPACE window
+class SpaceWindow : public juce::Component
+{
+public:
+    explicit SpaceWindow (HaldenReverbAudioProcessor&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void refresh();                         // called from the editor timer
+    std::function<void()> onClose;
+
+private:
+    HaldenReverbAudioProcessor& proc;
+    GlassKnob orbit, size, decay;
+    ChoiceRow launch, routing;
+    juce::TextButton go, stardust, close;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> stardustAttachment;
+    float lastProgress = -1.0f, lastOrbit = -1.0f;
 };
 
 // ------------------------------------------------------------------ FX module
@@ -218,7 +262,11 @@ private:
     bool drawerOpen = true, rackOpen = false;
     float uiScale = 1.0f, effScale = 1.0f;
     bool applyingSize = false;
-    juce::TextButton learnButton;
+    juce::TextButton learnButton, spaceButton, resetButton;
+    std::unique_ptr<hui::ChoiceRow> routingRow;
+    std::unique_ptr<hui::SpaceWindow> spaceWindow;
+    hui::Knob* mixKnob = nullptr;
+    void setSpaceOpen (bool open);
     float maxScaleForScreen (int w, int h) const;
 
     friend class Content;

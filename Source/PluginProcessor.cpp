@@ -24,8 +24,19 @@ float smoothstep (float e0, float e1, float x) noexcept
 
 constexpr float kShimSemis[4] = { -12.0f, -7.0f, 7.0f, 12.0f };
 constexpr double kPumpBeats[4] = { 2.0, 1.0, 0.5, 0.25 };   // 1/2, 1/4, 1/8, 1/16
-constexpr double kGateBeats[4] = { 0.25, 0.5, 1.0, 2.0 };   // 1/16, 1/8, 1/4, 1/2
 } // namespace
+
+// knobs that follow the algorithm (Ambience has its own set); Mix, gains, FX and routing stay put
+static const char* const kRecallIds[] = { "preDelayMs", "size", "decay", "highCutHz", "shape", "spread", "diffusion",
+                                          "bassMult", "crossoverHz", "spin", "wander", "width", "ducking" };
+static const std::vector<std::pair<juce::String, float>>& ambienceDefaults()
+{
+    static const std::vector<std::pair<juce::String, float>> v {
+        { "preDelayMs", 4.0f }, { "size", 0.55f }, { "decay", 0.9f }, { "highCutHz", 9000.0f }, { "shape", 0.25f },
+        { "spread", 0.55f }, { "diffusion", 0.70f }, { "bassMult", 1.0f }, { "crossoverHz", 400.0f },
+        { "spin", 0.30f }, { "wander", 0.25f }, { "width", 1.10f }, { "ducking", 0.0f } };
+    return v;
+}
 
 const juce::StringArray& HaldenReverbAudioProcessor::algorithmNames()
 {
@@ -41,6 +52,73 @@ HaldenReverbAudioProcessor::HaldenReverbAudioProcessor()
 {
     for (auto& v : inPeak)  v.store (0.0f);
     for (auto& v : outPeak) v.store (0.0f);
+    lastAlgo = juce::roundToInt (apvts.getRawParameterValue ("algorithm")->load());
+    apvts.addParameterListener ("algorithm", this);
+}
+
+HaldenReverbAudioProcessor::~HaldenReverbAudioProcessor()
+{
+    cancelPendingUpdate();
+    apvts.removeParameterListener ("algorithm", this);
+}
+
+void HaldenReverbAudioProcessor::parameterChanged (const juce::String&, float newValue)
+{
+    pendingAlgo.store (juce::roundToInt (newValue));
+    triggerAsyncUpdate();   // may come from the audio thread: do the work on the message thread
+}
+
+void HaldenReverbAudioProcessor::setKnobs (const std::vector<std::pair<juce::String, float>>& values)
+{
+    for (const auto& [id, v] : values)
+        if (auto* q = apvts.getParameter (id))
+        {
+            q->beginChangeGesture();
+            q->setValueNotifyingHost (q->convertTo0to1 (v));
+            q->endChangeGesture();
+        }
+}
+
+void HaldenReverbAudioProcessor::handleAsyncUpdate()
+{
+    const int now = pendingAlgo.load();
+    if (now == lastAlgo) return;
+
+    if (now == kAmbienceAlgo)
+    {
+        juce::StringArray saved;
+        for (auto* id : kRecallIds)
+            saved.add (juce::String (id) + "=" + juce::String (apvts.getRawParameterValue (id)->load(), 5));
+        apvts.state.setProperty ("mainKnobs", saved.joinIntoString (";"), nullptr);
+        setKnobs (ambienceDefaults());
+    }
+    else if (lastAlgo == kAmbienceAlgo)
+    {
+        std::vector<std::pair<juce::String, float>> restore;
+        for (auto& kv : juce::StringArray::fromTokens (apvts.state.getProperty ("mainKnobs").toString(), ";", ""))
+            if (kv.contains ("="))
+                restore.push_back ({ kv.upToFirstOccurrenceOf ("=", false, false), kv.fromFirstOccurrenceOf ("=", false, false).getFloatValue() });
+        if (restore.empty())   // never dialled anything: the plain defaults
+            for (auto* id : kRecallIds)
+                if (auto* q = apvts.getParameter (id)) restore.push_back ({ id, q->convertFrom0to1 (q->getDefaultValue()) });
+        setKnobs (restore);
+    }
+    lastAlgo = now;
+}
+
+void HaldenReverbAudioProcessor::resetAllToDefaults()
+{
+    const int algo = juce::roundToInt (apvts.getRawParameterValue ("algorithm")->load());
+    for (auto* q : getParameters())
+        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (q))
+        {
+            if (rp->getParameterID() == "algorithm" || rp->getParameterID() == "routing") continue;
+            rp->beginChangeGesture();
+            rp->setValueNotifyingHost (rp->getDefaultValue());
+            rp->endChangeGesture();
+        }
+    apvts.state.removeProperty ("mainKnobs", nullptr);
+    if (algo == kAmbienceAlgo) setKnobs (ambienceDefaults());
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout HaldenReverbAudioProcessor::createParameterLayout()
@@ -82,9 +160,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout HaldenReverbAudioProcessor::
     p.push_back (std::make_unique<APF> (pid ("riserAmt"), "Riser Amount", NRange (0.0f, 1.0f, 0.01f), 0.0f));
     p.push_back (std::make_unique<APB> (pid ("monoOn"), "Mono Bass", false));
     p.push_back (std::make_unique<APF> (pid ("monoHz"), "Mono Bass Freq", NRange (60.0f, 400.0f, 1.0f, 0.6f), 150.0f));
-    p.push_back (std::make_unique<APB> (pid ("gateOn"), "Gate", false));
-    p.push_back (std::make_unique<APC> (pid ("gateLen"), "Gate Length", juce::StringArray { "1/16", "1/8", "1/4", "1/2" }, 1));
-    p.push_back (std::make_unique<APF> (pid ("gateRelease"), "Gate Release", NRange (5.0f, 400.0f, 1.0f, 0.5f), 60.0f));
+
+    // IN SPACE
+    p.push_back (std::make_unique<APF> (pid ("orbit"), "Orbit", NRange (0.0f, 1.0f, 0.001f), 0.0f));
+    p.push_back (std::make_unique<APF> (pid ("spaceSize"), "Space Size", NRange (0.5f, 1.5f, 0.01f), 1.10f));
+    p.push_back (std::make_unique<APF> (pid ("spaceDecay"), "Space Decay", NRange (1.0f, 15.0f, 0.01f, 0.6f), 6.5f));
+    p.push_back (std::make_unique<APB> (pid ("stardust"), "Stardust +12", false));
+    p.push_back (std::make_unique<APC> (pid ("launchBars"), "Launch Length", juce::StringArray { "1 bar", "2 bars", "4 bars", "8 bars" }, 1));
+    p.push_back (std::make_unique<APC> (pid ("routing"), "Routing", juce::StringArray { "Insert", "Send" }, 0));
 
     return { p.begin(), p.end() };
 }
@@ -136,8 +219,9 @@ void HaldenReverbAudioProcessor::releaseResources()
     samplesSinceOnset = 1.0e9;
     glideSemis = riserSmooth = glideW = actFast = actPeak = shimEnv = lastWetL = lastWetR = 0.0f;
     tankL = tankR = xoverLpL = xoverLpR = dampLpL = dampLpR = inHpL = inHpR = dryEnv = duckEnv = 0.0f;
-    pumpGain = gateGain = 1.0f;
-    gateOpenSamples = 0;
+    pumpGain = 1.0f;
+    orbitS = 0.0f; launchActive = false; spaceWasOn = false;
+    spaceDryL.reset(); spaceDryR.reset();
     scopeScratchCount = 0;
     for (auto& v : inPeak)  v.store (0.0f);
     for (auto& v : outPeak) v.store (0.0f);
@@ -157,7 +241,8 @@ double HaldenReverbAudioProcessor::getTailLengthSeconds() const
     if (raw (apvts, "freezeOn") >= 0.5f)
         return 120.0;
     const float riser = raw (apvts, "riserOn") >= 0.5f ? raw (apvts, "riserAmt") : 0.0f;
-    const float decay = raw (apvts, "decay") * (1.0f + 2.0f * riser);
+    float decay = raw (apvts, "decay") * (1.0f + 2.0f * riser);
+    if (raw (apvts, "orbit") > 0.0f) decay = std::max (decay, raw (apvts, "spaceDecay"));
     const float lowMult = std::max (1.0f, raw (apvts, "bassMult"));
     return static_cast<double> (decay * lowMult * 1.7f + raw (apvts, "preDelayMs") * 0.001f + 0.5f);
 }
@@ -202,11 +287,31 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     riserSmooth += (1.0f - std::exp (-static_cast<float> (numSamples) / (0.12f * static_cast<float> (currentSampleRate)))) * (riserRaw - riserSmooth);
     if (std::abs (riserRaw - riserSmooth) < 1.0e-4f) riserSmooth = riserRaw;
     const float riser = riserSmooth;
-    const float sizeTarget = raw (apvts, "size") * prof.tankScale;
-    const float decaySec = raw (apvts, "decay") * (1.0f + 2.0f * riser);
-    const float bassMult = raw (apvts, "bassMult") * (haalOn ? 0.8f : 1.0f);   // HaalAi keeps lows light
+
+    // ---- IN SPACE: ORBIT macro (own size / decay take over the tank as ORBIT leaves 0)
+    const float orbitParam = raw (apvts, "orbit");
+    const bool sendMode = raw (apvts, "routing") >= 0.5f;
+    const bool stardust = raw (apvts, "stardust") >= 0.5f;
+    static constexpr double kLaunchBars[4] = { 1.0, 2.0, 4.0, 8.0 };
+    if (spaceGoRequest.exchange (false))
+    {
+        if (launchActive) launchActive = false;   // second press cancels
+        else
+        {
+            launchActive = true;
+            launchPos = 0.0;
+            launchLenBeats = 4.0 * kLaunchBars[juce::jlimit (0, 3, static_cast<int> (raw (apvts, "launchBars")))];
+            launchFrom = orbitParam;
+        }
+    }
+    const float spaceE = smoothstep (0.0f, 0.08f, orbitS);   // how much the IN SPACE laws apply
+    const float sizeTarget = (raw (apvts, "size") + (raw (apvts, "spaceSize") - raw (apvts, "size")) * spaceE) * prof.tankScale;
+    const float decaySec = (raw (apvts, "decay") + (raw (apvts, "spaceDecay") - raw (apvts, "decay")) * spaceE) * (1.0f + 2.0f * riser);
+    float bassMult = raw (apvts, "bassMult") * (haalOn ? 0.8f : 1.0f);   // HaalAi keeps lows light
+    bassMult += (0.72f - bassMult) * spaceE;                                // IN SPACE: lows fade first, the tail floats
     const float crossoverHz = raw (apvts, "crossoverHz");
-    const float highCutHz = std::min (sr * 0.45f, raw (apvts, "highCutHz") * prof.highBias);
+    float highCutHz = std::min (sr * 0.45f, raw (apvts, "highCutHz") * prof.highBias);
+    highCutHz += (std::min (sr * 0.45f, std::max (highCutHz, 17000.0f)) - highCutHz) * spaceE;   // IN SPACE tail stays open on top
     const float diffusion = std::min (1.0f, raw (apvts, "diffusion") + (haalOn ? 0.1f : 0.0f));
     const float shape = raw (apvts, "shape");
     const float spread = raw (apvts, "spread");
@@ -222,9 +327,6 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const float shimInterval = kShimSemis[juce::jlimit (0, 3, static_cast<int> (raw (apvts, "shimPitch")))];
     const bool shimGlide = raw (apvts, "shimGlide") >= 0.5f;
     const bool freezeOn = raw (apvts, "freezeOn") >= 0.5f;
-    const bool gateOn = raw (apvts, "gateOn") >= 0.5f;
-    const double gateBeats = kGateBeats[juce::jlimit (0, 3, static_cast<int> (raw (apvts, "gateLen")))];
-    const float gateRelMs = raw (apvts, "gateRelease");
 
     // Shimmer: the wet signal is pitch-shifted and fed back into the reverb input, so each pass
     // through the whole reverb adds a new layer an interval away (classic bloom, not a fast cascade).
@@ -235,7 +337,7 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const float glideAmt = glideOn ? raw (apvts, "shimMix") : 0.0f;
     float shimAmount = cascadeOn ? raw (apvts, "shimMix") * 0.9f : 0.0f;
     const float semis = cascadeOn ? shimInterval : 12.0f;
-    shimAmount = std::min (0.92f, shimAmount + 0.45f * riser);
+    shimAmount = std::min (0.92f, shimAmount + 0.45f * riser + (stardust ? 0.55f * smoothstep (0.45f, 1.0f, orbitS) : 0.0f));
     const float glideSeconds = juce::jlimit (0.5f, 6.0f, raw (apvts, "decay") * 0.8f);
     const float glideSmooth = 1.0f - std::exp (-1.0f / (0.030f * sr));
     const float shimRatioL = std::pow (2.0f, (semis + 0.04f) / 12.0f);   // +-4 cents: wider, less metallic
@@ -255,7 +357,6 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         }
     const double beatsPerSample = bpm / 60.0 / currentSampleRate;
     double ppq = playing ? hostPpq : freeRunPpq;
-    const int gateLenSamples = static_cast<int> (gateBeats * 60.0 / bpm * currentSampleRate);
 
     // ---- Derived tank values
     const float loopSec = std::max (0.04f, (4453.0f + 3720.0f + 672.0f + 1800.0f) * srScale * sizeTarget / sr);
@@ -295,7 +396,8 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         firstBlock = false;
     }
 
-    const float preMs = haalOn ? std::max (raw (apvts, "preDelayMs"), haalMinPreDelayMs()) : raw (apvts, "preDelayMs");
+    float preMs = haalOn ? std::max (raw (apvts, "preDelayMs"), haalMinPreDelayMs()) : raw (apvts, "preDelayMs");
+    preMs += ((haalOn ? haalMinPreDelayMs() : 8.0f) - preMs) * spaceE;   // IN SPACE: short pre-delay
     xPre.setTarget (std::max (1.0f, preMs * 0.001f * sr));
     xSize.setTarget (sizeTarget);
 
@@ -330,6 +432,8 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         haal.setCurve (pendingCurve, pendingNum, pendingShelf);
     }
     haalWasActive = haalOn;
+    const float orbitRise = 1.0f - std::exp (-1.0f / (0.030f * sr));
+    const float orbitFall = 1.0f - std::exp (-1.0f / (0.008f * sr));   // the drop is instant
     const float haalFreqA = 1.0f - std::exp (-32.0f / (0.020f * sr));
     const float haalAtkA  = 1.0f - std::exp (-32.0f / (0.006f * sr));
     const float haalRelA  = 1.0f - std::exp (-32.0f / (0.090f * sr));
@@ -384,14 +488,12 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const float envAtk = 1.0f - std::exp (-1.0f / (0.004f * sr));
     const float envRel = 1.0f - std::exp (-1.0f / (0.18f * sr));
     const float pumpAlpha = 1.0f - std::exp (-1.0f / (0.003f * sr));
-    const float gateAtk = 1.0f - std::exp (-1.0f / (0.001f * sr));
     const float actAtk = 1.0f - std::exp (-1.0f / (0.002f * sr));
     const float actRel = 1.0f - std::exp (-1.0f / (0.040f * sr));
     const float actPeakRel = std::exp (-1.0f / (0.30f * sr));
     const float shimEnvRel = std::exp (-1.0f / (0.25f * sr));
     const float glideFadeIn = 1.0f / (0.15f * sr);
     const float glideFadeOut = 1.0f / (0.12f * sr);
-    const float gateRel = 1.0f - std::exp (-1.0f / (gateRelMs * 0.001f * sr));
     const float randAlpha = 1.0f - std::exp (-1.0f / (0.09f * sr));
     const int randPeriod = std::max (1, static_cast<int> (sr * 0.07f));
 
@@ -409,10 +511,41 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     for (int i = 0; i < numSamples; ++i)
     {
         const float inGain = smInGain.next();
-        const float dryL = outL[i] * inGain;
-        const float dryR = (outR != nullptr ? outR[i] : outL[i]) * inGain;
+
+        // ORBIT: knob, or the LAUNCH ramp (tempo-synced) up to 100 %, then an instant drop
+        float orbitTarget = orbitParam;
+        if (launchActive)
+        {
+            launchPos += beatsPerSample;
+            const double pr = launchPos / launchLenBeats;
+            if (pr >= 1.0) launchActive = false;
+            else orbitTarget = launchFrom + (1.0f - launchFrom) * static_cast<float> (pr);
+        }
+        orbitS += (orbitTarget < orbitS ? orbitFall : orbitRise) * (orbitTarget - orbitS);
+        if (orbitS < 1.0e-4f && orbitTarget <= 0.0f) orbitS = 0.0f;
+        if (--spaceCounter <= 0)
+        {
+            spaceCounter = 32;
+            if (orbitS > 0.0f)
+                for (auto* c : { &spaceDryL, &spaceDryR })
+                    c->setOrbit (orbitS, sr);
+        }
+        float dryL = outL[i] * inGain;
+        float dryR = (outR != nullptr ? outR[i] : outL[i]) * inGain;
         pkInL = std::max (pkInL, std::abs (dryL));
         pkInR = std::max (pkInR, std::abs (dryR));
+        // IN SPACE low cut sits at the input: the voice and what feeds the reverb leave together
+        if (orbitS > 0.0f)
+        {
+            dryL = spaceDryL.process (dryL);
+            dryR = spaceDryR.process (dryR);
+            spaceWasOn = true;
+        }
+        else if (spaceWasOn)
+        {
+            spaceDryL.reset(); spaceDryR.reset();
+            spaceWasOn = false;
+        }
 
         // Size changes crossfade between two delay lengths instead of stretching the delays,
         // so the notes in the tail keep their pitch while the knob moves.
@@ -426,7 +559,7 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         const float gM = smGMid.next() * (1.0f - freeze) + 0.99995f * freeze;
         const float gL = smGLow.next() * (1.0f - freeze) + 0.99995f * freeze;
 
-        // ---- Ducking envelope (dry level), also used as the gate trigger
+        // ---- Ducking envelope (dry level)
         const float dryLvl = std::max (std::abs (dryL), std::abs (dryR));
         dryEnv += (dryLvl > dryEnv ? envAtk : envRel) * (dryLvl - dryEnv);
         const float duckGain = ducking > 0.001f
@@ -436,7 +569,7 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
         // ---- Phrase activity (level independent): input counts as "sounding" while it is sustained,
         //      i.e. within 6 dB of its short-term peak (a held note yes, a decaying drum hit no).
-        //      Gate stays open while sounding and for its length after; Glide waits for silence.
+        //      Glide waits for silence after the phrase.
         actFast += (dryLvl > actFast ? actAtk : actRel) * (dryLvl - actFast);
         actPeak = std::max (actFast, actPeak * actPeakRel);
         const bool hit = onset.process (dryLvl);
@@ -444,7 +577,6 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         if (sounding || hit)
         {
             samplesSinceOnset = 0.0;
-            gateOpenSamples = gateLenSamples;
         }
         else
         {
@@ -542,7 +674,7 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         const float lfoL = (std::sin (spinPhase) * 0.6f + std::sin (wanderPhase) * 0.4f) * (1.0f - rm) + randomValue * rm;
         const float lfoR = (std::cos (spinPhase) * 0.6f + std::cos (wanderPhase * 0.87f) * 0.4f) * (1.0f - rm) - randomValue * rm;
         const float modDepth = smModDepth.next() * (1.0f - freeze);
-        const bool hq = freeze > 0.001f;
+        const bool hq = freeze > 0.001f || orbitS > 0.0f;   // Hermite reads keep the top open (Freeze, IN SPACE)
 
         // ---- Tank (cross-coupled, with optional pitch-shifted feedback for shimmer)
         const float feedIn = diff * (1.0f - freeze);
@@ -648,18 +780,6 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         if (monoBassOn)
             side = monoSideHp2.process (monoSideHp1.process (side));
 
-        // ---- FX: Gate (input-triggered, tempo-synced hold)
-        if (gateOn)
-        {
-            const float target = gateOpenSamples > 0 ? 1.0f : 0.0f;
-            if (gateOpenSamples > 0) --gateOpenSamples;
-            gateGain += (target > gateGain ? gateAtk : gateRel) * (target - gateGain);
-        }
-        else
-        {
-            gateGain += gateAtk * (1.0f - gateGain);
-        }
-
         // ---- FX: Pump (tempo-synced volume shape on the tail)
         float pumpTarget = 1.0f;
         if (pumpOn)
@@ -672,7 +792,7 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         pumpGain += pumpAlpha * (pumpTarget - pumpGain);
         ppq += beatsPerSample;
 
-        const float tailGain = gateGain * pumpGain * duckGain;
+        const float tailGain = pumpGain * duckGain;
         const float width = smWidth.next() + smRiserWidth.next();
         float finalWetL = (mid + side * width) * tailGain;
         float finalWetR = (mid - side * width) * tailGain;
@@ -690,10 +810,23 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             scopeScratchCount = 0;
         }
 
-        // ---- Mix (equal power: 100% = fully wet) and output gain
-        const float mix = smMix.next();
-        const float dryG = std::cos (mix * juce::MathConstants<float>::halfPi);
-        const float wetG = std::sin (mix * juce::MathConstants<float>::halfPi);
+        // ---- Mix (equal power: 100% = fully wet; SEND = always fully wet) and output gain
+        const float mix = sendMode ? 1.0f : smMix.next();
+        float dryG = std::cos (mix * juce::MathConstants<float>::halfPi);
+        float wetG = std::sin (mix * juce::MathConstants<float>::halfPi);
+        if (orbitS > 0.0f)
+        {
+            const float e = smoothstep (0.0f, 0.08f, orbitS);
+            if (sendMode)
+                wetG *= 1.0f + (juce::Decibels::decibelsToGain (6.0f * orbitS) - 1.0f) * e;   // the space grows on the bus
+            else
+            {
+                // insert: dry stays at full level (already cut from below), the space around it grows
+                const float spaceWet = juce::Decibels::decibelsToGain (kSpaceWetDb0 + kSpaceWetDbPerUnit * orbitS);
+                dryG += (1.0f - dryG) * e;
+                wetG += (spaceWet - wetG) * e;
+            }
+        }
         const float outGain = smOutGain.next();
         const float oL = (dryL * dryG + finalWetL * wetG) * outGain;
         const float oR = (dryR * dryG + finalWetR * wetG) * outGain;
@@ -714,6 +847,9 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     storeMax (inPeak[0], pkInL);  storeMax (inPeak[1], pkInR);
     storeMax (outPeak[0], pkOutL); storeMax (outPeak[1], pkOutR);
     duckReductionDb.store (ducking > 0.001f ? -juce::Decibels::gainToDecibels (minDuckGain) : 0.0f, std::memory_order_relaxed);
+
+    spaceOrbitNow.store (orbitS, std::memory_order_relaxed);
+    spaceLaunchProgress.store (launchActive ? static_cast<float> (launchPos / launchLenBeats) : 0.0f, std::memory_order_relaxed);
 
     haalLearning.store (haal.isLearning(), std::memory_order_relaxed);
     haalProgress.store (haal.learnProgress(), std::memory_order_relaxed);
@@ -765,6 +901,9 @@ void HaldenReverbAudioProcessor::setStateInformation (const void* data, int size
     if (xmlState != nullptr && xmlState->hasTagName (apvts.state.getType()))
     {
         apvts.replaceState (juce::ValueTree::fromXml (*xmlState));
+        // a loaded project is taken as it is: no Ambience recall for this change
+        lastAlgo = juce::roundToInt (apvts.getRawParameterValue ("algorithm")->load());
+        pendingAlgo.store (lastAlgo);
         const auto curve = apvts.state.getProperty ("haalaiCurve").toString();
         if (curve.isNotEmpty())
         {

@@ -131,6 +131,18 @@ public:
         a2 = (1.0f - alpha) / a0;
     }
 
+    // first-order high-pass (bilinear)
+    void setHighPass1 (float freq, float sr) noexcept
+    {
+        const float f = juce::jlimit (0.5f, sr * 0.45f, freq);
+        const float K = std::tan (juce::MathConstants<float>::pi * f / sr);
+        b0 = 1.0f / (1.0f + K);
+        b1 = -b0;
+        b2 = 0.0f;
+        a1 = (K - 1.0f) / (K + 1.0f);
+        a2 = 0.0f;
+    }
+
     void setPeak (float freq, float sr, float q, float gainDb) noexcept
     {
         const float f = juce::jlimit (20.0f, sr * 0.45f, freq);
@@ -296,6 +308,46 @@ struct OnsetDetector
 };
 
 // Simple per-sample linear smoother that is cheap enough to run on many values
+// IN SPACE low cut. One first-order stage plus two second-order stages that join in as ORBIT
+// rises, so the slope grows from 6 dB/oct (about a third of the way) to 30 dB/oct near the top,
+// while the cutoff climbs exponentially (fitted to measurements of a DJ-style build-up effect:
+// ~250 Hz at 33 %, ~300 Hz + a 2nd-order stage at 55 %, ~1.8 kHz 5th-order at 90 %).
+class SpaceLowCut
+{
+public:
+    static float cutoff (float o) noexcept
+    {
+        const float f = std::exp2 (7.86f + 4.6f * std::pow (o, 4.2f));
+        const float fade = std::exp2 (-8.0f * (1.0f - smooth01 (o / 0.15f)));   // gentle start from 0 %
+        return std::min (6000.0f, f) * fade;
+    }
+    static float stage2Octaves (float o) noexcept   // how far below the cutoff stage 2 sits
+    {
+        if (o >= 0.9f) return 0.0f;
+        if (o >= 0.55f) return 0.74f * (0.9f - o) / 0.35f;
+        return std::min (10.0f, 0.74f + (0.55f - o) * 24.0f);
+    }
+    static float stage3Octaves (float o) noexcept
+    {
+        return juce::jlimit (0.0f, 10.0f, 6.0f * (0.9f - o) / 0.3f);
+    }
+
+    void setOrbit (float o, float sr) noexcept
+    {
+        const float f = cutoff (o);
+        s1.setHighPass1 (f, sr);
+        s2.setHighPass (std::max (2.0f, f * std::exp2 (-stage2Octaves (o))), sr);
+        s3.setHighPass (std::max (2.0f, f * std::exp2 (-stage3Octaves (o))), sr);
+    }
+    void reset() noexcept { s1.reset(); s2.reset(); s3.reset(); }
+    inline float process (float x) noexcept { return s3.process (s2.process (s1.process (x))); }
+    float magnitudeDb (float freq, float sr) const noexcept { return s1.magnitudeDb (freq, sr) + s2.magnitudeDb (freq, sr) + s3.magnitudeDb (freq, sr); }
+
+private:
+    static float smooth01 (float t) noexcept { t = juce::jlimit (0.0f, 1.0f, t); return t * t * (3.0f - 2.0f * t); }
+    BiquadFilter s1, s2, s3;
+};
+
 // A length (delay time / size) that changes by crossfading between the old and the new value
 // instead of sliding. Reads use a (old), b (new) and x (0..1).
 struct XfadeLength
