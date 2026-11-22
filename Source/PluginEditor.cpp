@@ -121,9 +121,16 @@ void hui::LookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b,
 
     if (style == "spaceEntry")
     {
-        g.setColour (on ? juce::Colour (0xff2a1f5c) : juce::Colour (0xff17112c));
+        if (on)   // soft violet glow, easy on the eyes
+        {
+            g.setColour (juce::Colour (0xff8b5cf6).withAlpha (0.10f));
+            g.fillRoundedRectangle (r.expanded (3.0f), 6.0f);
+            g.setColour (juce::Colour (0xff8b5cf6).withAlpha (0.16f));
+            g.fillRoundedRectangle (r.expanded (1.5f), 5.0f);
+        }
+        g.setColour (on ? juce::Colour (0xff261b4d) : juce::Colour (0xff111318));
         g.fillRoundedRectangle (r, 4.0f);
-        g.setColour (on ? juce::Colour (0xffc4b5fd) : juce::Colour (0xff6d5bb8));
+        g.setColour (on ? juce::Colour (0xff9f86e8) : (over ? juce::Colour (0xff4a3f78) : col::line));
         g.drawRoundedRectangle (r, 4.0f, 1.0f);
         return;
     }
@@ -158,7 +165,7 @@ void hui::LookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& b, b
     if (style == "spaceBtn" || style == "spaceToggle") c = on ? juce::Colour (0xfff3efff) : juce::Colour (0xff9a90c8);
     if (style == "spaceGo") c = juce::Colour (0xff1a1033);
     if (style == "spaceText") c = over ? juce::Colour (0xfff3efff) : juce::Colour (0xffb7acdf);
-    if (style == "spaceEntry") c = on ? juce::Colour (0xfff3efff) : juce::Colour (0xffc4b5fd);
+    if (style == "spaceEntry") c = on ? juce::Colour (0xffe4dcff) : (over ? juce::Colour (0xff9a90c8) : col::textLo);
 
     if (style == "spaceBtn" || style == "spaceGo" || style == "spaceToggle" || style == "spaceText")
     {
@@ -1227,9 +1234,14 @@ HaldenReverbAudioProcessorEditor::HaldenReverbAudioProcessorEditor (HaldenReverb
     content.addAndMakeVisible (*routingRow);
 
     // IN SPACE entry under HaalAi, and a quiet "reset" above it
-    spaceButton.setButtonText ("IN SPACE");
     setStyle (spaceButton, "spaceEntry");
-    spaceButton.onClick = [this] { setSpaceOpen (spaceWindow == nullptr || ! spaceWindow->isVisible()); };
+    spaceButton.setTooltip ("Click: IN SPACE on, open or close its window.  Double-click: IN SPACE off");
+    spaceButton.onSingle = [this]
+    {
+        if (proc.apvts.getRawParameterValue ("spaceOn")->load() < 0.5f) { setSpaceOn (true); setSpaceOpen (true); }
+        else setSpaceOpen (! spaceWindow->isVisible());
+    };
+    spaceButton.onDouble = [this] { setSpaceOpen (false); setSpaceOn (false); };
     content.addAndMakeVisible (spaceButton);
 
     resetButton.setButtonText ("reset");
@@ -1464,18 +1476,29 @@ void HaldenReverbAudioProcessorEditor::Content::paint (juce::Graphics& g)
     }
 }
 
+void HaldenReverbAudioProcessorEditor::setSpaceOn (bool on)
+{
+    if (auto* q = proc.apvts.getParameter ("spaceOn"))
+    {
+        q->beginChangeGesture();
+        q->setValueNotifyingHost (on ? 1.0f : 0.0f);
+        q->endChangeGesture();
+    }
+    spaceButton.setToggleState (on, juce::dontSendNotification);
+}
+
 void HaldenReverbAudioProcessorEditor::setSpaceOpen (bool open)
 {
     spaceWindow->setVisible (open);
     if (open) spaceWindow->toFront (false);
     drawerTab.setVisible (! open);
-    spaceButton.setToggleState (open || proc.spaceOrbitNow.load() > 0.0f, juce::dontSendNotification);
 }
 
 void HaldenReverbAudioProcessorEditor::timerCallback()
 {
     const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
-    const bool spaceLit = spaceWindow->isVisible() || proc.spaceOrbitNow.load() > 0.0f;
+    const bool spaceLit = proc.apvts.getRawParameterValue ("spaceOn")->load() >= 0.5f;
+    if (! spaceLit && spaceWindow->isVisible()) setSpaceOpen (false);   // switched off by automation / reset
     if (spaceButton.getToggleState() != spaceLit) spaceButton.setToggleState (spaceLit, juce::dontSendNotification);
     if (spaceWindow->isVisible()) spaceWindow->refresh();
     const bool send = proc.apvts.getRawParameterValue ("routing")->load() >= 0.5f;

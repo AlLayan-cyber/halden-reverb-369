@@ -149,6 +149,25 @@ private:
     juce::Rectangle<float> plotArea() const;
 };
 
+// ------------------------------------------------------------------ IN SPACE entry button
+// one click: on + open / close the window; double click: IN SPACE off
+class SpaceEntryButton : public juce::TextButton, private juce::Timer
+{
+public:
+    SpaceEntryButton() : juce::TextButton ("IN SPACE") {}
+    std::function<void()> onSingle, onDouble;
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        if (! isEnabled() || ! getLocalBounds().contains (e.getPosition())) { juce::TextButton::mouseUp (e); return; }
+        if (e.getNumberOfClicks() >= 2) { stopTimer(); if (onDouble) onDouble(); }
+        else startTimer (juce::MouseEvent::getDoubleClickTimeout() + 20);
+        juce::TextButton::mouseUp (e);
+    }
+private:
+    void timerCallback() override { stopTimer(); if (onSingle) onSingle(); }
+    void clicked() override {}
+};
+
 // ------------------------------------------------------------------ IN SPACE glass knob
 class GlassKnob : public juce::Component
 {
@@ -262,7 +281,9 @@ private:
     bool drawerOpen = true, rackOpen = false;
     float uiScale = 1.0f, effScale = 1.0f;
     bool applyingSize = false;
-    juce::TextButton learnButton, spaceButton, resetButton;
+    juce::TextButton learnButton, resetButton;
+    hui::SpaceEntryButton spaceButton;
+    void setSpaceOn (bool on);
     std::unique_ptr<hui::ChoiceRow> routingRow;
     std::unique_ptr<hui::SpaceWindow> spaceWindow;
     hui::Knob* mixKnob = nullptr;

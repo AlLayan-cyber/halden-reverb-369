@@ -369,12 +369,21 @@ static int runDsp()
     }
 
     { // 19. IN SPACE: ORBIT 0 leaves the plugin untouched
-        P a, b; setP (a, "algorithm", 2); setP (b, "algorithm", 2); setP (a, "mix", 0.3f); setP (b, "mix", 0.3f); setP (b, "orbit", 0.0f); setP (b, "spaceDecay", 12.0f); setP (b, "stardust", 1);
+        P a, b; setP (a, "algorithm", 2); setP (b, "algorithm", 2); setP (a, "mix", 0.3f); setP (b, "mix", 0.3f); setP (b, "spaceOn", 1); setP (b, "orbit", 0.0f); setP (b, "spaceDecay", 12.0f); setP (b, "stardust", 1);
         Voice v1 (sr), v2 (sr);
         auto oa = render (a, sr, 3, [&] (int n, int ch) { static float l = 0; if (ch == 1) return l; l = v1.next (n); return l; });
         auto ob = render (b, sr, 3, [&] (int n, int ch) { static float l = 0; if (ch == 1) return l; l = v2.next (n); return l; });
         double diff = 0; for (size_t i = 0; i < oa.L.size(); ++i) diff = std::max (diff, (double) std::abs (oa.L[i] - ob.L[i]));
         check (diff < 1e-6, "ORBIT 0 = normal reverb", "max diff " + juce::String (diff, 8));
+    }
+    { // 19b. IN SPACE switched off: ORBIT/LAUNCH do nothing at all
+        P a, b; setP (a, "algorithm", 2); setP (b, "algorithm", 2); setP (a, "mix", 0.3f); setP (b, "mix", 0.3f);
+        setP (b, "spaceOn", 0); setP (b, "orbit", 0.8f); setP (b, "stardust", 1); b.spaceGoRequest.store (true);
+        Voice v1 (sr), v2 (sr);
+        auto oa = render (a, sr, 3, [&] (int n, int ch) { static float l = 0; if (ch == 1) return l; l = v1.next (n); return l; });
+        auto ob = render (b, sr, 3, [&] (int n, int ch) { static float l = 0; if (ch == 1) return l; l = v2.next (n); return l; });
+        double diff = 0; for (size_t i = 0; i < oa.L.size(); ++i) diff = std::max (diff, (double) std::abs (oa.L[i] - ob.L[i]));
+        check (diff < 1e-6 && b.spaceOrbitNow.load() == 0.0f, "IN SPACE off = as if never switched on", "max diff " + juce::String (diff, 8));
     }
     { // 20. IN SPACE low cut follows the measured curve (+-4 dB)
         struct Pt { float o, f, db; };
@@ -393,12 +402,12 @@ static int runDsp()
         check (ok, "IN SPACE low cut matches the reference (4 dB/15%)", s);
     }
     { // 21. SEND: no dry at all, even with Mix at 0 and ORBIT up
-        P p; setP (p, "routing", 1); setP (p, "mix", 0.0f); setP (p, "orbit", 0.5f);
+        P p; setP (p, "routing", 1); setP (p, "mix", 0.0f); setP (p, "spaceOn", 1); setP (p, "orbit", 0.5f);
         auto o = render (p, sr, 0.5, impulse);
         check (std::abs (o.L[0]) < 1e-6f && energy (o.L, 100, o.L.size()) > 1e-6, "SEND = 100 % wet", "sample0=" + juce::String (o.L[0], 6));
     }
     { // 22. LAUNCH ramps ORBIT to 100 % over 1 bar and drops back
-        P p; setP (p, "launchBars", 0); setP (p, "mix", 0.2f);
+        P p; setP (p, "spaceOn", 1); setP (p, "launchBars", 0); setP (p, "mix", 0.2f);
         float atHalf = 0, atEnd = 0, after = 0;
         render (p, sr, 3.0, [] (int n, int) { return 0.2f * std::sin (n * 0.05f); }, [&] (int pos)
         {
@@ -411,7 +420,7 @@ static int runDsp()
         check (std::abs (atHalf - 0.5f) < 0.05f && atEnd > 0.95f && after < 0.02f, "LAUNCH 1 bar: ramp up, then drop", juce::String (atHalf, 2) + " -> " + juce::String (atEnd, 2) + " -> " + juce::String (after, 2));
     }
     { // 23. IN SPACE at the top with STARDUST stays stable
-        P p; setP (p, "orbit", 1.0f); setP (p, "stardust", 1); setP (p, "spaceDecay", 15.0f); setP (p, "spaceSize", 1.5f);
+        P p; setP (p, "spaceOn", 1); setP (p, "orbit", 1.0f); setP (p, "stardust", 1); setP (p, "spaceDecay", 15.0f); setP (p, "spaceSize", 1.5f);
         Voice v (sr);
         auto o = render (p, sr, 25, [&] (int n, int ch) { static float l = 0; if (ch == 1) return l; l = n < sr * 4 ? v.next (n) : 0.0f; return l; });
         bool fin; const float pk = peakOf (o, fin);
@@ -420,7 +429,7 @@ static int runDsp()
     }
 
     { // 24. Ambience loads its own settings, leaving it brings mine back; RESET restores defaults
-        P p; setP (p, "algorithm", 2); setP (p, "decay", 5.0f); setP (p, "size", 1.3f); setP (p, "orbit", 0.4f);
+        P p; setP (p, "algorithm", 2); setP (p, "decay", 5.0f); setP (p, "size", 1.3f); setP (p, "spaceOn", 1); setP (p, "orbit", 0.4f);
         const auto pump = [] { juce::MessageManager::getInstance()->runDispatchLoopUntil (60); };
         const auto val = [&] (const char* id) { return p.apvts.getRawParameterValue (id)->load(); };
         pump();
@@ -524,7 +533,7 @@ static int runShots (const juce::String& dir)
     }
     {
         // IN SPACE window open, ORBIT at 62 %, STARDUST on
-        setP (p, "orbit", 0.62f); setP (p, "stardust", 1); setP (p, "launchBars", 1);
+        setP (p, "spaceOn", 1); setP (p, "orbit", 0.62f); setP (p, "stardust", 1); setP (p, "launchBars", 1);
         std::unique_ptr<juce::AudioProcessorEditor> e (p.createEditor());
         e->setVisible (true); settle (600);
         shoot (*e, out.getChildFile ("6_main_with_space_entry.png"));

@@ -162,6 +162,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout HaldenReverbAudioProcessor::
     p.push_back (std::make_unique<APF> (pid ("monoHz"), "Mono Bass Freq", NRange (60.0f, 400.0f, 1.0f, 0.6f), 150.0f));
 
     // IN SPACE
+    p.push_back (std::make_unique<APB> (pid ("spaceOn"), "In Space", false));
     p.push_back (std::make_unique<APF> (pid ("orbit"), "Orbit", NRange (0.0f, 1.0f, 0.001f), 0.0f));
     p.push_back (std::make_unique<APF> (pid ("spaceSize"), "Space Size", NRange (0.5f, 1.5f, 0.01f), 1.10f));
     p.push_back (std::make_unique<APF> (pid ("spaceDecay"), "Space Decay", NRange (1.0f, 15.0f, 0.01f, 0.6f), 6.5f));
@@ -242,7 +243,7 @@ double HaldenReverbAudioProcessor::getTailLengthSeconds() const
         return 120.0;
     const float riser = raw (apvts, "riserOn") >= 0.5f ? raw (apvts, "riserAmt") : 0.0f;
     float decay = raw (apvts, "decay") * (1.0f + 2.0f * riser);
-    if (raw (apvts, "orbit") > 0.0f) decay = std::max (decay, raw (apvts, "spaceDecay"));
+    if (raw (apvts, "spaceOn") >= 0.5f && raw (apvts, "orbit") > 0.0f) decay = std::max (decay, raw (apvts, "spaceDecay"));
     const float lowMult = std::max (1.0f, raw (apvts, "bassMult"));
     return static_cast<double> (decay * lowMult * 1.7f + raw (apvts, "preDelayMs") * 0.001f + 0.5f);
 }
@@ -289,11 +290,14 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const float riser = riserSmooth;
 
     // ---- IN SPACE: ORBIT macro (own size / decay take over the tank as ORBIT leaves 0)
-    const float orbitParam = raw (apvts, "orbit");
+    // switched off = as if IN SPACE was never touched (its knob settings are kept for next time)
+    const bool spaceOn = raw (apvts, "spaceOn") >= 0.5f;
+    const float orbitParam = spaceOn ? raw (apvts, "orbit") : 0.0f;
+    if (! spaceOn) launchActive = false;
     const bool sendMode = raw (apvts, "routing") >= 0.5f;
     const bool stardust = raw (apvts, "stardust") >= 0.5f;
     static constexpr double kLaunchBars[4] = { 1.0, 2.0, 4.0, 8.0 };
-    if (spaceGoRequest.exchange (false))
+    if (spaceGoRequest.exchange (false) && spaceOn)
     {
         if (launchActive) launchActive = false;   // second press cancels
         else
