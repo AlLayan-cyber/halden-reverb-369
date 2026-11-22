@@ -510,16 +510,17 @@ void Lcd::paint (juce::Graphics& g)
         g.setColour (col::blue);
         g.strokePath (line, juce::PathStrokeType (2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
+        const bool haalView = juce::roundToInt (st.getRawParameterValue ("algorithm")->load()) == HaldenReverbAudioProcessor::kHaalAlgo;
         juce::Path dashed;
         const float dashes[] = { 4.0f, 3.0f };
-        juce::PathStrokeType (1.2f).createDashedStroke (dashed, peak, dashes, 2);
-        g.setColour (juce::Colour (0xffe0f2fe).withAlpha (0.85f));
+        const float dots[] = { 1.5f, 3.0f };
+        juce::PathStrokeType (haalView ? 1.0f : 1.2f).createDashedStroke (dashed, peak, haalView ? dots : dashes, 2);
+        g.setColour (juce::Colour (0xffe0f2fe).withAlpha (haalView ? 0.4f : 0.85f));
         g.fillPath (dashed);
 
         // Post-EQ curve: always while EQ is on, briefly while its cutoffs are being touched
         const bool eqOn = st.getRawParameterValue ("eqEnabled")->load() >= 0.5f;
-        const double te = now - eqTouch;
-        const float eqTouchA = te < 0.25 ? static_cast<float> (te / 0.25) : te < 1.8 ? 1.0f : std::max (0.0f, 1.0f - static_cast<float> ((te - 1.8) / 0.4));
+        const float eqTouchA = overlayAlpha (eqStart, eqTouch);
         const float eqA = eqOn ? 0.9f : eqTouchA * 0.6f;
         if (eqA > 0.01f)
         {
@@ -538,9 +539,13 @@ void Lcd::paint (juce::Graphics& g)
         }
     }
 
-    // decay envelope overlay (fades in while time controls are touched)
-    const double t = now - envTouch;
-    const float envA = t < 0.25 ? static_cast<float> (t / 0.25) : t < 1.8 ? 1.0f : std::max (0.0f, 1.0f - static_cast<float> ((t - 1.8) / 0.4));
+    // HaalAi: learned voice curve (dashed) and the three tracking bands
+    const int algoNow = juce::jlimit (0, 7, static_cast<int> (st.getRawParameterValue ("algorithm")->load()));
+    if (algoNow == HaldenReverbAudioProcessor::kHaalAlgo)
+        paintHaalAi (g, a);
+
+    // decay envelope overlay: fades in once, stays while the knob moves, fades after release
+    const float envA = overlayAlpha (envStart, envTouch);
     if (envA > 0.01f)
     {
         g.setColour (col::lcdBg.withAlpha (0.72f * envA));
@@ -575,7 +580,7 @@ void Lcd::paint (juce::Graphics& g)
     }
 
     // header text
-    const int algo = juce::jlimit (0, 6, static_cast<int> (st.getRawParameterValue ("algorithm")->load()));
+    const int algo = algoNow;
     g.setColour (col::blue);
     g.setFont (font (15.0f));
     g.drawText (HaldenReverbAudioProcessor::algorithmNames()[algo].toUpperCase(), juce::Rectangle<float> (16.0f, 10.0f, 300.0f, 20.0f), juce::Justification::centredLeft);
@@ -598,6 +603,107 @@ void Lcd::paint (juce::Graphics& g)
         g.setFont (font (12.0f));
         g.drawText ("FX  " + fx.joinIntoString (juce::String (juce::CharPointer_UTF8 (" \xc2\xb7 "))),
                     juce::Rectangle<float> (b.getRight() - 420.0f, 10.0f, 404.0f, 20.0f), juce::Justification::centredRight);
+    }
+}
+
+float Lcd::overlayAlpha (double start, double touch) const
+{
+    const double sinceStart = now - start, sinceTouch = now - touch;
+    if (sinceTouch < 0.0 || sinceStart < 0.0) return 0.0f;
+    const float fadeIn = static_cast<float> (juce::jlimit (0.0, 1.0, sinceStart / 0.15));
+    const float fadeOut = sinceTouch < 1.4 ? 1.0f : std::max (0.0f, 1.0f - static_cast<float> ((sinceTouch - 1.4) / 0.4));
+    return std::min (fadeIn, fadeOut);
+}
+
+void Lcd::paintHaalAi (juce::Graphics& g, juce::Rectangle<float> a)
+{
+    const float sr = static_cast<float> (proc.scopeSampleRate.load());
+    const bool learning = proc.haalLearning.load();
+    const float progress = proc.haalProgress.load();
+    const int nStatic = learning ? 0 : proc.haalNumStatic.load();
+
+    std::array<haldendsp::BiquadFilter, HaldenReverbAudioProcessor::kStatic> bands;
+    for (int b = 0; b < nStatic; ++b)
+        bands[(size_t) b].setPeak (proc.haalStaticF[(size_t) b].load(), sr, proc.haalStaticQ[(size_t) b].load(), proc.haalStaticG[(size_t) b].load());
+    haldendsp::BiquadFilter shelf, hp, light;
+    shelf.setHighShelf (8000.0f, sr, learning ? 0.0f : proc.haalShelf.load());
+    hp.setHighPass (120.0f, sr);
+    light.setPeak (280.0f, sr, 0.7f, -2.0f);
+
+    const float refY = a.getY() + a.getHeight() * 0.42f;
+    const float pxPerDb = 4.0f;
+    const auto curveDb = [&] (float f)
+    {
+        float d = 2.0f * hp.magnitudeDb (f, sr) + shelf.magnitudeDb (f, sr) + light.magnitudeDb (f, sr);
+        for (int b = 0; b < nStatic; ++b) d += bands[(size_t) b].magnitudeDb (f, sr);
+        return juce::jlimit (-14.0f, 6.0f, d);
+    };
+
+    // 0 dB reference and the learned curve (dashed)
+    g.setColour (juce::Colour (0xff1d3b63));
+    g.drawHorizontalLine (juce::roundToInt (refY), a.getX(), a.getRight());
+    juce::Path curve;
+    for (int i = 0; i <= 160; ++i)
+    {
+        const float f = 20.0f * std::pow (1000.0f, static_cast<float> (i) / 160.0f);
+        const float y = refY - curveDb (f) * pxPerDb;
+        if (i == 0) curve.startNewSubPath (xForFreq (f), y); else curve.lineTo (xForFreq (f), y);
+    }
+    juce::Path dashed;
+    const float dashes[] = { 6.0f, 4.0f };
+    juce::PathStrokeType (1.6f).createDashedStroke (dashed, curve, dashes, 2);
+    g.setColour (juce::Colour (0xffe8d9a8).withAlpha (learning ? 0.35f : 0.9f));
+    g.fillPath (dashed);
+
+    // D1-D3: circles riding on the curve, gain-reduction bar under each
+    for (int b = 0; b < HaldenReverbAudioProcessor::kDyn; ++b)
+    {
+        const float f = proc.haalDynF[(size_t) b].load();
+        const float gr = -proc.haalDynG[(size_t) b].load();            // 0..2 dB
+        const float x = xForFreq (juce::jlimit (25.0f, 19000.0f, f));
+        const float y = refY - (curveDb (f) - gr) * pxPerDb;
+        const float active = juce::jlimit (0.0f, 1.0f, gr / 2.0f);
+        const auto ring = col::iceBlue.interpolatedWith (col::amber, active);
+
+        if (active > 0.05f)
+        {
+            g.setColour (ring.withAlpha (0.25f * active));
+            g.fillEllipse (x - 15.0f, y - 15.0f, 30.0f, 30.0f);
+        }
+        g.setColour (col::lcdBg);
+        g.fillEllipse (x - 11.0f, y - 11.0f, 22.0f, 22.0f);
+        g.setColour (ring);
+        g.drawEllipse (x - 11.0f, y - 11.0f, 22.0f, 22.0f, 1.6f);
+        g.setFont (font (10.5f, true));
+        g.drawText ("D" + juce::String (b + 1), juce::Rectangle<float> (x - 11.0f, y - 11.0f, 22.0f, 22.0f), juce::Justification::centred);
+
+        // activity meter: grows with the cut (full = 2 dB)
+        const juce::Rectangle<float> meter (x - 3.0f, y + 15.0f, 6.0f, 22.0f);
+        g.setColour (juce::Colour (0xff0f2340));
+        g.fillRoundedRectangle (meter, 2.0f);
+        g.setColour (ring);
+        g.fillRoundedRectangle (meter.withTop (meter.getBottom() - meter.getHeight() * active), 2.0f);
+        g.setFont (font (10.0f));
+        g.drawText (gr > 0.05f ? juce::String (juce::CharPointer_UTF8 ("\xe2\x88\x92")) + juce::String (gr, 1) : juce::String ("0.0"),
+                    juce::Rectangle<float> (x - 20.0f, meter.getBottom() + 1.0f, 40.0f, 12.0f), juce::Justification::centred);
+    }
+
+    // status line
+    g.setFont (font (12.0f));
+    if (learning)
+    {
+        const juce::Rectangle<float> bar (a.getX() + 4.0f, a.getY() + 9.0f, 160.0f, 4.0f);
+        g.setColour (juce::Colour (0xff0f2340));
+        g.fillRoundedRectangle (bar, 2.0f);
+        g.setColour (col::amber);
+        g.fillRoundedRectangle (bar.withWidth (bar.getWidth() * progress), 2.0f);
+        g.drawText ("LEARNING VOICE  " + juce::String (juce::roundToInt (progress * 100.0f)) + " %   sing for 4 s",
+                    juce::Rectangle<float> (bar.getRight() + 10.0f, a.getY() + 4.0f, 300.0f, 14.0f), juce::Justification::centredLeft);
+    }
+    else if (progress >= 1.0f)
+    {
+        g.setColour (juce::Colour (0xffe8d9a8));
+        g.drawText ("VOICE CURVE  - - -     D1 D2 D3  max 2 dB", juce::Rectangle<float> (a.getX() + 4.0f, a.getY() + 4.0f, 330.0f, 14.0f), juce::Justification::centredLeft);
     }
 }
 
@@ -687,8 +793,8 @@ const KnobDef kAdv[]  = { { "shape", "SHAPE", 80 }, { "spread", "SPREAD", 150 },
                           { "spin", "SPIN", 535 }, { "wander", "WANDER", 605 },
                           { "width", "WIDTH", 705 }, { "ducking", "DUCKING", 775 },
                           { "eqLowCutHz", "LO CUT", 860 }, { "eqHighCutHz", "HI CUT", 925 } };
-const char* kAlgoShort[] = { "R.HALL", "C.HALL", "HALL", "CHAMBER", "ROOM", "PLATE", "AMBIENCE" };
-const float kScales[] = { 0.75f, 1.0f, 1.25f, 1.5f };
+const char* kAlgoShort[] = { "R.HALL", "C.HALL", "HALL", "CHAMBER", "ROOM", "PLATE", "AMBIENCE", "HaalAi" };
+const float kScales[] = { 0.6f, 0.75f, 1.0f, 1.25f };
 } // namespace
 
 HaldenReverbAudioProcessorEditor::HaldenReverbAudioProcessorEditor (HaldenReverbAudioProcessor& p)
@@ -703,7 +809,7 @@ HaldenReverbAudioProcessorEditor::HaldenReverbAudioProcessorEditor (HaldenReverb
     uiScale    = static_cast<float> (static_cast<double> (p.apvts.state.getProperty (idScale, 1.0)));
 
     // algorithm buttons
-    for (int i = 0; i < 7; ++i)
+    for (int i = 0; i < 8; ++i)
     {
         auto b = std::make_unique<juce::TextButton> (kAlgoShort[i]);
         setStyle (*b, "algo");
@@ -716,8 +822,15 @@ HaldenReverbAudioProcessorEditor::HaldenReverbAudioProcessorEditor (HaldenReverb
         currentAlgo = juce::roundToInt (v);
         for (size_t i = 0; i < algoButtons.size(); ++i)
             algoButtons[i]->setToggleState (static_cast<int> (i) == currentAlgo, juce::dontSendNotification);
+        learnButton.setVisible (currentAlgo == HaldenReverbAudioProcessor::kHaalAlgo);
         lcd.repaint();
     });
+
+    learnButton.setButtonText ("RE-LEARN");
+    setStyle (learnButton, "small");
+    learnButton.setTooltip ("Listen to the voice again for 4 s and rebuild the curve");
+    learnButton.onClick = [this] { proc.haalRequestLearn.store (true); };
+    content.addChildComponent (learnButton);
     algoAttachment->sendInitialUpdate();
 
     content.addAndMakeVisible (inFader);
@@ -725,6 +838,7 @@ HaldenReverbAudioProcessorEditor::HaldenReverbAudioProcessorEditor (HaldenReverb
     content.addAndMakeVisible (inMeter);
     content.addAndMakeVisible (outMeter);
     content.addAndMakeVisible (lcd);
+    learnButton.toFront (false);
 
     for (const auto& d : kMain)
     {
@@ -815,30 +929,66 @@ void HaldenReverbAudioProcessorEditor::setUiProp (const juce::Identifier& id, co
     proc.apvts.state.setProperty (id, v, nullptr);
 }
 
+float HaldenReverbAudioProcessorEditor::maxScaleForScreen (int w, int h) const
+{
+    const auto& displays = juce::Desktop::getInstance().getDisplays();
+    const juce::Displays::Display* d = isShowing() ? displays.getDisplayForRect (getScreenBounds()) : displays.getPrimaryDisplay();
+    if (d == nullptr) return 2.0f;
+    // leave room for the host's title bar, the plug-in header and the taskbar / dock
+    const auto area = d->userArea;
+    return std::min (static_cast<float> (area.getWidth()) * 0.96f / static_cast<float> (w),
+                     static_cast<float> (area.getHeight()) * 0.86f / static_cast<float> (h));
+}
+
 void HaldenReverbAudioProcessorEditor::applyWindowSize()
 {
     const int w = kPanelW + (rackOpen ? kRackW : 0);
     const int h = drawerOpen ? kOpenH : kClosedH;
+    // never open bigger than the screen: shrink automatically on small laptop displays
+    effScale = juce::jlimit (0.45f, 1.6f, std::min (uiScale, maxScaleForScreen (w, h)));
+
+    applyingSize = true;
+    setResizable (true, true);
+    if (auto* c = getConstrainer())
+    {
+        c->setFixedAspectRatio (static_cast<double> (w) / static_cast<double> (h));
+        c->setSizeLimits (juce::roundToInt (w * 0.45f), juce::roundToInt (h * 0.45f), juce::roundToInt (w * 1.6f), juce::roundToInt (h * 1.6f));
+    }
     content.setBounds (0, 0, w, h);
-    content.setTransform (juce::AffineTransform::scale (uiScale));
+    content.setTransform (juce::AffineTransform::scale (effScale));
     layout();
-    setSize (juce::roundToInt (static_cast<float> (w) * uiScale), juce::roundToInt (static_cast<float> (h) * uiScale));
+    setSize (juce::roundToInt (static_cast<float> (w) * effScale), juce::roundToInt (static_cast<float> (h) * effScale));
+    applyingSize = false;
     content.repaint();
 }
 
-void HaldenReverbAudioProcessorEditor::resized() {}
+void HaldenReverbAudioProcessorEditor::resized()
+{
+    if (applyingSize) return;
+    // dragged by the corner: follow the new width (the aspect ratio is fixed)
+    const int w = content.getWidth();
+    if (w <= 0) return;
+    effScale = uiScale = static_cast<float> (getWidth()) / static_cast<float> (w);
+    setUiProp ("uiScale", uiScale);
+    content.setTransform (juce::AffineTransform::scale (effScale));
+    for (size_t i = 0; i < scaleButtons.size(); ++i)
+        scaleButtons[i].setToggleState (std::abs (kScales[i] - effScale) < 0.02f, juce::dontSendNotification);
+}
 
 void HaldenReverbAudioProcessorEditor::layout()
 {
     const int h = content.getHeight();
 
-    int x = 330;
+    int total = 0;
+    for (size_t i = 0; i < algoButtons.size(); ++i) total += juce::String (kAlgoShort[i]).length() * 8 + 18 + 6;
+    int x = 964 - total + 6;
     for (size_t i = 0; i < algoButtons.size(); ++i)
     {
-        const int w = juce::String (kAlgoShort[i]).length() * 9 + 24;
+        const int w = juce::String (kAlgoShort[i]).length() * 8 + 18;
         algoButtons[i]->setBounds (x, 30, w, 34);
-        x += w + 8;
+        x += w + 6;
     }
+    learnButton.setBounds (150 + 700 - 96, 100 + 250 - 54, 78, 20);
 
     inFader.setBounds (40, 98, 40, 272);
     inMeter.setBounds (96, 104, 26, 242);
@@ -872,7 +1022,7 @@ void HaldenReverbAudioProcessorEditor::layout()
     int sx = 800;
     for (size_t i = 0; i < scaleButtons.size(); ++i)
     {
-        scaleButtons[i].setToggleState (std::abs (kScales[i] - uiScale) < 0.01f, juce::dontSendNotification);
+        scaleButtons[i].setToggleState (std::abs (kScales[i] - effScale) < 0.02f, juce::dontSendNotification);
         scaleButtons[i].setBounds (sx, h - 30, i == 3 ? 46 : 36, 20);
         sx += i == 3 ? 46 : 38;
     }

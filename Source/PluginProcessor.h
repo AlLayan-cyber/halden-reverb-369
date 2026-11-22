@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include "DSP.h"
+#include "HaalAi.h"
 #include <array>
 #include <atomic>
 
@@ -44,6 +45,19 @@ public:
     std::array<std::atomic<float>, 2> outPeak {};
     std::atomic<float> duckReductionDb { 0.0f };   // positive dB of tail attenuation
 
+    // ---- HaalAi telemetry / control
+    static constexpr int kHaalAlgo = 7;
+    static constexpr int kStatic = haldendsp::VoiceAnalyzer::kMaxStatic;
+    static constexpr int kDyn = haldendsp::VoiceAnalyzer::kDyn;
+    std::atomic<bool> haalRequestLearn { false };
+    std::atomic<float> haalProgress { 0.0f };       // 0..1 while learning, 1 when a curve exists
+    std::atomic<bool> haalLearning { false };
+    std::atomic<int> haalNumStatic { 0 };
+    std::array<std::atomic<float>, kStatic> haalStaticF {}, haalStaticG {}, haalStaticQ {};
+    std::atomic<float> haalShelf { 0.0f };
+    std::array<std::atomic<float>, kDyn> haalDynF {}, haalDynG {};   // Hz, dB (<= 0)
+    float haalMinPreDelayMs() const { return 32.0f; }
+
     // Wet signal tap for the LCD spectrum analyser (single producer / single consumer)
     static constexpr int kScopeFifoSize = 16384;
     juce::AbstractFifo scopeFifo { kScopeFifoSize };
@@ -66,6 +80,24 @@ private:
     haldendsp::BiquadFilter shimHpL, shimHpR, shimLpL, shimLpR;
     haldendsp::PitchShifter shiftL, shiftR, glideL, glideR;
     haldendsp::OnsetDetector onset;
+    haldendsp::XfadeLength xSize, xPre;
+
+    haldendsp::VoiceAnalyzer haal;
+    haldendsp::BiquadFilter haalHp1, haalHp2, haalShelfF, haalLight;
+    std::array<haldendsp::BiquadFilter, kStatic> haalStaticFilt;
+    std::array<float, kStatic> haalStaticCur {};
+    std::array<haldendsp::BiquadFilter, kDyn> haalDynFilt;
+    std::array<float, kDyn> haalDynLogf {}, haalDynGain {};
+    float haalShelfCur = 0.0f;
+    int haalCounter = 0;
+    bool haalWasActive = false;
+
+    // curve restored from a saved project (message thread -> audio thread)
+    std::array<haldendsp::CurveBand, kStatic> pendingCurve {};
+    int pendingNum = 0;
+    float pendingShelf = 0.0f;
+    std::atomic<bool> pendingCurveReady { false };
+    void publishHaalCurve();
     double samplesSinceOnset = 1.0e9;
     float glideSemis = 0.0f, riserSmooth = 0.0f, glideW = 0.0f;
     float actFast = 0.0f, actPeak = 0.0f, shimEnv = 0.0f, lastWetL = 0.0f, lastWetR = 0.0f;

@@ -29,7 +29,7 @@ constexpr double kGateBeats[4] = { 0.25, 0.5, 1.0, 2.0 };   // 1/16, 1/8, 1/4, 1
 
 const juce::StringArray& HaldenReverbAudioProcessor::algorithmNames()
 {
-    static const juce::StringArray names { "Random Hall", "Concert Hall", "Hall", "Chamber", "Room", "Vintage Plate", "Ambience" };
+    static const juce::StringArray names { "Random Hall", "Concert Hall", "Hall", "Chamber", "Room", "Vintage Plate", "Ambience", "HaalAi" };
     return names;
 }
 
@@ -106,6 +106,10 @@ void HaldenReverbAudioProcessor::prepareToPlay (double sampleRate, int)
     delayL1.resize (sz (10000.0f)); delayR1.resize (sz (10000.0f));
     apL2.resize (sz (6000.0f)); apR2.resize (sz (6000.0f));
     delayL2.resize (sz (9000.0f)); delayR2.resize (sz (9000.0f));
+    haal.prepare (sampleRate);
+    haalHp1.setHighPass (120.0f, static_cast<float> (sampleRate));
+    haalHp2.setHighPass (120.0f, static_cast<float> (sampleRate));
+    haalLight.setPeak (280.0f, static_cast<float> (sampleRate), 0.7f, -2.0f);   // HaalAi voicing: never heavy in the low-mids
     shiftL.prepare (sampleRate, 0.080);
     shiftR.prepare (sampleRate, 0.080);
     glideL.prepare (sampleRate, 0.080);
@@ -176,17 +180,19 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         buffer.copyFrom (1, 0, buffer, 0, 0, numSamples);
 
     struct AlgoProfile { float tankScale, erWeight, lateWeight, bloomBias, modBias, highBias, randomMod; };
-    static constexpr std::array<AlgoProfile, 7> profiles {{
+    static constexpr std::array<AlgoProfile, 8> profiles {{
         { 1.00f, 0.32f, 0.85f, 0.35f, 1.15f, 1.00f, 0.55f }, // Random Hall
         { 1.18f, 0.28f, 0.90f, 0.55f, 0.95f, 0.95f, 0.00f }, // Concert Hall
         { 0.92f, 0.36f, 0.84f, 0.25f, 0.85f, 1.00f, 0.00f }, // Hall
         { 0.72f, 0.44f, 0.82f, 0.15f, 0.75f, 1.05f, 0.00f }, // Chamber
         { 0.54f, 0.58f, 0.72f, 0.08f, 0.60f, 0.92f, 0.00f }, // Room
         { 0.68f, 0.18f, 0.94f, 0.02f, 0.80f, 0.82f, 0.00f }, // Vintage Plate
-        { 0.42f, 0.85f, 0.28f, 0.05f, 0.40f, 1.10f, 0.00f }  // Ambience
+        { 0.42f, 0.85f, 0.28f, 0.05f, 0.40f, 1.10f, 0.00f }, // Ambience
+        { 1.06f, 0.10f, 0.96f, 0.70f, 0.32f, 0.62f, 0.20f }  // HaalAi: warm, soft-edged cloud, little detune
     }};
 
-    const int algoIdx = juce::jlimit (0, 6, static_cast<int> (raw (apvts, "algorithm")));
+    const int algoIdx = juce::jlimit (0, 7, static_cast<int> (raw (apvts, "algorithm")));
+    const bool haalOn = algoIdx == kHaalAlgo;
     const auto& prof = profiles[static_cast<size_t> (algoIdx)];
     const float sr = static_cast<float> (currentSampleRate);
     const float twoPi = juce::MathConstants<float>::twoPi;
@@ -198,10 +204,10 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const float riser = riserSmooth;
     const float sizeTarget = raw (apvts, "size") * prof.tankScale;
     const float decaySec = raw (apvts, "decay") * (1.0f + 2.0f * riser);
-    const float bassMult = raw (apvts, "bassMult");
+    const float bassMult = raw (apvts, "bassMult") * (haalOn ? 0.8f : 1.0f);   // HaalAi keeps lows light
     const float crossoverHz = raw (apvts, "crossoverHz");
     const float highCutHz = std::min (sr * 0.45f, raw (apvts, "highCutHz") * prof.highBias);
-    const float diffusion = raw (apvts, "diffusion");
+    const float diffusion = std::min (1.0f, raw (apvts, "diffusion") + (haalOn ? 0.1f : 0.0f));
     const float shape = raw (apvts, "shape");
     const float spread = raw (apvts, "spread");
     const float spin = raw (apvts, "spin");
@@ -271,8 +277,8 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     if (firstBlock)
     {
         const double s = currentSampleRate;
-        smPreDelay.reset (s, 0.15, raw (apvts, "preDelayMs") * 0.001f * sr);
-        smSize.reset (s, 0.25, sizeTarget);
+        xPre.reset (s, 0.05, std::max (1.0f, raw (apvts, "preDelayMs") * 0.001f * sr));
+        xSize.reset (s, 0.2, sizeTarget);
         smGMid.reset (s, 0.05, gMid);
         smGLow.reset (s, 0.05, gLow);
         smErWeight.reset (s, 0.05, prof.erWeight * (1.15f - bloomShape * 0.45f));
@@ -289,8 +295,44 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         firstBlock = false;
     }
 
-    smPreDelay.setTarget (std::max (1.0f, raw (apvts, "preDelayMs") * 0.001f * sr));
-    smSize.setTarget (sizeTarget);
+    const float preMs = haalOn ? std::max (raw (apvts, "preDelayMs"), haalMinPreDelayMs()) : raw (apvts, "preDelayMs");
+    xPre.setTarget (std::max (1.0f, preMs * 0.001f * sr));
+    xSize.setTarget (sizeTarget);
+
+    // ---- HaalAi: learning control, static curve smoothing
+    if (haalOn)
+    {
+        if (pendingCurveReady.exchange (false, std::memory_order_acquire))
+            haal.setCurve (pendingCurve, pendingNum, pendingShelf);
+        if (haalRequestLearn.exchange (false) || (! haal.hasCurve() && ! haal.isLearning()))
+            haal.startLearning();
+        if (! haalWasActive)
+        {
+            haal.resetDynamics();
+            for (int b = 0; b < kDyn; ++b) { haalDynLogf[(size_t) b] = haal.dyn[(size_t) b].logf; haalDynGain[(size_t) b] = 0.0f; }
+        }
+
+        const float a = 1.0f - std::exp (-static_cast<float> (numSamples) / (0.25f * sr));
+        for (int b = 0; b < kStatic; ++b)
+        {
+            const bool used = haal.hasCurve() && b < haal.numStatic;
+            const float target = used ? haal.staticBands[(size_t) b].gain : 0.0f;
+            auto& cur = haalStaticCur[(size_t) b];
+            cur += a * (target - cur);
+            const auto& bd = haal.staticBands[(size_t) b];
+            haalStaticFilt[(size_t) b].setPeak (used ? bd.freq : 1000.0f, sr, used ? bd.q : 1.0f, cur);
+        }
+        haalShelfCur += a * ((haal.hasCurve() ? haal.shelfGain : 0.0f) - haalShelfCur);
+        haalShelfF.setHighShelf (8000.0f, sr, haalShelfCur);
+    }
+    else if (pendingCurveReady.exchange (false, std::memory_order_acquire))
+    {
+        haal.setCurve (pendingCurve, pendingNum, pendingShelf);
+    }
+    haalWasActive = haalOn;
+    const float haalFreqA = 1.0f - std::exp (-32.0f / (0.020f * sr));
+    const float haalAtkA  = 1.0f - std::exp (-32.0f / (0.006f * sr));
+    const float haalRelA  = 1.0f - std::exp (-32.0f / (0.090f * sr));
     smGMid.setTarget (gMid);
     smGLow.setTarget (gLow);
     smErWeight.setTarget (prof.erWeight * (1.15f - bloomShape * 0.45f));
@@ -372,8 +414,14 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         pkInL = std::max (pkInL, std::abs (dryL));
         pkInR = std::max (pkInR, std::abs (dryR));
 
-        const float sizeParam = smSize.next();
-        const float tankClampSize = juce::jlimit (0.45f, 1.40f, sizeParam);
+        // Size changes crossfade between two delay lengths instead of stretching the delays,
+        // so the notes in the tail keep their pitch while the knob moves.
+        xSize.tick (0.02f);
+        const float sA = xSize.a, sB = xSize.b, sx = xSize.x;
+        // equal-power weights: the two readouts of a dense tail are uncorrelated
+        const float wA = std::cos (sx * juce::MathConstants<float>::halfPi), wB = std::sin (sx * juce::MathConstants<float>::halfPi);
+        const float sizeParam = xSize.current();
+        const float clampA = juce::jlimit (0.45f, 1.40f, sA), clampB = juce::jlimit (0.45f, 1.40f, sB);
         const float freeze = smFreeze.next();
         const float gM = smGMid.next() * (1.0f - freeze) + 0.99995f * freeze;
         const float gL = smGLow.next() * (1.0f - freeze) + 0.99995f * freeze;
@@ -406,12 +454,48 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         // ---- Input conditioning, pre-delay and input diffusion
         inHpL += hpAlpha * (dryL - inHpL);
         inHpR += hpAlpha * (dryR - inHpR);
-        preDelayL.write (dryL - inHpL);
-        preDelayR.write (dryR - inHpR);
-        const float preSamples = smPreDelay.next();
-        const float preL = preDelayL.readFrac (preSamples);
-        const float preR = preDelayR.readFrac (preSamples);
-        const float monoIn = 0.5f * (preL + preR);
+        if (haalOn)
+        {
+            // HaalAi send: low cut, learned voice curve, air shelf; analysed before the pre-delay
+            float m = 0.5f * ((dryL - inHpL) + (dryR - inHpR));
+            m = haalLight.process (haalHp2.process (haalHp1.process (m)));
+            for (auto& f : haalStaticFilt) m = f.process (m);
+            m = haalShelfF.process (m);
+            haal.push (m, sounding);
+            preDelayL.write (m);
+            preDelayR.write (m);
+        }
+        else
+        {
+            preDelayL.write (dryL - inHpL);
+            preDelayR.write (dryR - inHpR);
+        }
+        xPre.tick (1.0f);
+        const bool pX = xPre.x > 0.0f;
+        const float pA = preDelayL.readFrac (xPre.a), qA = preDelayR.readFrac (xPre.a);
+        const float preL = pX ? pA + (preDelayL.readFrac (xPre.b) - pA) * xPre.x : pA;
+        const float preR = pX ? qA + (preDelayR.readFrac (xPre.b) - qA) * xPre.x : qA;
+        float monoIn = 0.5f * (preL + preR);
+
+        if (haalOn)
+        {
+            // three dynamic bells (D1-D3) gliding after the detected resonances; the pre-delay
+            // (at least 32 ms here) lets them act before the analysed sound reaches the reverb
+            if (--haalCounter <= 0)
+            {
+                haalCounter = 32;
+                for (int b = 0; b < kDyn; ++b)
+                {
+                    const auto& d = haal.dyn[(size_t) b];
+                    auto& lf = haalDynLogf[(size_t) b];
+                    auto& g = haalDynGain[(size_t) b];
+                    lf += haalFreqA * (d.targetLogf - lf);
+                    g += (d.targetGain < g ? haalAtkA : haalRelA) * (d.targetGain - g);
+                    haalDynFilt[(size_t) b].setPeak (std::exp2 (lf), sr, 4.5f, g);
+                }
+            }
+            for (auto& f : haalDynFilt) monoIn = f.process (monoIn);
+        }
 
         float shimFeed = 0.0f;
         const float shim = smShim.next() * (1.0f - freeze);
@@ -464,44 +548,58 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         const float feedIn = diff * (1.0f - freeze);
         const float crossR = tankR, crossL = tankL;
 
-        const float mApL = modApL.process (feedIn + crossR, 672.0f * srScale * tankClampSize + lfoL * modDepth, tankDiff1, hq);
+        // inside the feedback loop: linear crossfade (gain never above 1)
+        const auto rd = [&] (const haldendsp::DelayLine& line, float base)
+        {
+            const float a = line.read (base * sA, hq);
+            return sx > 0.0f ? a + (line.read (base * sB, hq) - a) * sx : a;
+        };
+        // output taps: equal-power crossfade (no level dip in the middle)
+        const auto tap = [&] (const haldendsp::DelayLine& line, float base)
+        {
+            const float a = line.read (base * sA, hq);
+            return sx > 0.0f ? a * wA + line.read (base * sB, hq) * wB : a;
+        };
+        const float ss = srScale;
+
+        const float mApL = modApL.processX (feedIn + crossR, 672.0f * ss * clampA + lfoL * modDepth, 672.0f * ss * clampB + lfoL * modDepth, sx, tankDiff1, hq);
         delayL1.write (mApL);
-        const float dL1Out = delayL1.read (4453.0f * srScale * sizeParam, hq);
+        const float dL1Out = rd (delayL1, 4453.0f * ss);
         xoverLpL += xoverAlpha * (dL1Out - xoverLpL);
         dampLpL += highAlpha * ((dL1Out - xoverLpL) - dampLpL);
         const float dampedL = (xoverLpL * gL + dampLpL * gM) * (1.0f - freeze) + dL1Out * gM * freeze;
-        delayL2.write (apL2.process (dampedL, 1800.0f * srScale * sizeParam, -tankDiff2, hq));
-        const float nextTankL = delayL2.read (3720.0f * srScale * sizeParam, hq);
+        delayL2.write (apL2.processX (dampedL, 1800.0f * ss * sA, 1800.0f * ss * sB, sx, -tankDiff2, hq));
+        const float nextTankL = rd (delayL2, 3720.0f * ss);
 
-        const float mApR = modApR.process (feedIn + crossL, 908.0f * srScale * tankClampSize + lfoR * modDepth, tankDiff1, hq);
+        const float mApR = modApR.processX (feedIn + crossL, 908.0f * ss * clampA + lfoR * modDepth, 908.0f * ss * clampB + lfoR * modDepth, sx, tankDiff1, hq);
         delayR1.write (mApR);
-        const float dR1Out = delayR1.read (4217.0f * srScale * sizeParam, hq);
+        const float dR1Out = rd (delayR1, 4217.0f * ss);
         xoverLpR += xoverAlpha * (dR1Out - xoverLpR);
         dampLpR += highAlpha * ((dR1Out - xoverLpR) - dampLpR);
         const float dampedR = (xoverLpR * gL + dampLpR * gM) * (1.0f - freeze) + dR1Out * gM * freeze;
-        delayR2.write (apR2.process (dampedR, 2656.0f * srScale * sizeParam, -tankDiff2, hq));
-        const float nextTankR = delayR2.read (3163.0f * srScale * sizeParam, hq);
+        delayR2.write (apR2.processX (dampedR, 2656.0f * ss * sA, 2656.0f * ss * sB, sx, -tankDiff2, hq));
+        const float nextTankR = rd (delayR2, 3163.0f * ss);
 
         tankL = haldendsp::flushDenormal (nextTankL);
         tankR = haldendsp::flushDenormal (nextTankR);
 
         float wetL =
-            0.6f * delayR1.read (266.0f * srScale * sizeParam, hq) +
-            0.6f * delayR1.read (2974.0f * srScale * sizeParam, hq) -
-            0.5f * apR2.delay.read (1235.0f * srScale * sizeParam, hq) +
-            0.5f * delayR2.read (1996.0f * srScale * sizeParam, hq) -
-            0.5f * delayL1.read (1990.0f * srScale * sizeParam, hq) -
-            0.4f * apL2.delay.read (187.0f * srScale * sizeParam, hq) -
-            0.4f * delayL2.read (1066.0f * srScale * sizeParam, hq);
+            0.6f * tap (delayR1, 266.0f * ss) +
+            0.6f * tap (delayR1, 2974.0f * ss) -
+            0.5f * tap (apR2.delay, 1235.0f * ss) +
+            0.5f * tap (delayR2, 1996.0f * ss) -
+            0.5f * tap (delayL1, 1990.0f * ss) -
+            0.4f * tap (apL2.delay, 187.0f * ss) -
+            0.4f * tap (delayL2, 1066.0f * ss);
 
         float wetR =
-            0.6f * delayL1.read (353.0f * srScale * sizeParam, hq) +
-            0.6f * delayL1.read (3627.0f * srScale * sizeParam, hq) -
-            0.5f * apL2.delay.read (1228.0f * srScale * sizeParam, hq) +
-            0.5f * delayL2.read (2673.0f * srScale * sizeParam, hq) -
-            0.5f * delayR1.read (2111.0f * srScale * sizeParam, hq) -
-            0.4f * apR2.delay.read (335.0f * srScale * sizeParam, hq) -
-            0.4f * delayR2.read (121.0f * srScale * sizeParam, hq);
+            0.6f * tap (delayL1, 353.0f * ss) +
+            0.6f * tap (delayL1, 3627.0f * ss) -
+            0.5f * tap (apL2.delay, 1228.0f * ss) +
+            0.5f * tap (delayL2, 2673.0f * ss) -
+            0.5f * tap (delayR1, 2111.0f * ss) -
+            0.4f * tap (apR2.delay, 335.0f * ss) -
+            0.4f * tap (delayR2, 121.0f * ss);
 
         const float erW = smErWeight.next() * (1.0f - freeze);
         const float lateW = smLateWeight.next();
@@ -616,6 +714,25 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     storeMax (inPeak[0], pkInL);  storeMax (inPeak[1], pkInR);
     storeMax (outPeak[0], pkOutL); storeMax (outPeak[1], pkOutR);
     duckReductionDb.store (ducking > 0.001f ? -juce::Decibels::gainToDecibels (minDuckGain) : 0.0f, std::memory_order_relaxed);
+
+    haalLearning.store (haal.isLearning(), std::memory_order_relaxed);
+    haalProgress.store (haal.learnProgress(), std::memory_order_relaxed);
+    if (haal.hasCurve())
+    {
+        haalNumStatic.store (haal.numStatic, std::memory_order_relaxed);
+        for (int b = 0; b < kStatic; ++b)
+        {
+            haalStaticF[(size_t) b].store (haal.staticBands[(size_t) b].freq, std::memory_order_relaxed);
+            haalStaticG[(size_t) b].store (haal.staticBands[(size_t) b].gain, std::memory_order_relaxed);
+            haalStaticQ[(size_t) b].store (haal.staticBands[(size_t) b].q, std::memory_order_relaxed);
+        }
+        haalShelf.store (haal.shelfGain, std::memory_order_relaxed);
+    }
+    for (int b = 0; b < kDyn; ++b)
+    {
+        haalDynF[(size_t) b].store (std::exp2 (haalDynLogf[(size_t) b]), std::memory_order_relaxed);
+        haalDynG[(size_t) b].store (haalOn ? haalDynGain[(size_t) b] : 0.0f, std::memory_order_relaxed);
+    }
 }
 
 juce::AudioProcessorEditor* HaldenReverbAudioProcessor::createEditor()
@@ -623,8 +740,20 @@ juce::AudioProcessorEditor* HaldenReverbAudioProcessor::createEditor()
     return new HaldenReverbAudioProcessorEditor (*this);
 }
 
+void HaldenReverbAudioProcessor::publishHaalCurve()
+{
+    const int n = haalNumStatic.load();
+    if (haalProgress.load() < 1.0f || haalLearning.load()) return;
+    juce::StringArray parts;
+    parts.add (juce::String (haalShelf.load(), 3));
+    for (int b = 0; b < n; ++b)
+        parts.add (juce::String (haalStaticF[(size_t) b].load(), 1) + ":" + juce::String (haalStaticG[(size_t) b].load(), 3) + ":" + juce::String (haalStaticQ[(size_t) b].load(), 3));
+    apvts.state.setProperty ("haalaiCurve", parts.joinIntoString (";"), nullptr);
+}
+
 void HaldenReverbAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
+    publishHaalCurve();
     auto state = apvts.copyState();
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
@@ -634,7 +763,23 @@ void HaldenReverbAudioProcessor::setStateInformation (const void* data, int size
 {
     std::unique_ptr<juce::XmlElement> xmlState (getXmlFromBinary (data, sizeInBytes));
     if (xmlState != nullptr && xmlState->hasTagName (apvts.state.getType()))
+    {
         apvts.replaceState (juce::ValueTree::fromXml (*xmlState));
+        const auto curve = apvts.state.getProperty ("haalaiCurve").toString();
+        if (curve.isNotEmpty())
+        {
+            auto parts = juce::StringArray::fromTokens (curve, ";", "");
+            pendingShelf = parts[0].getFloatValue();
+            pendingNum = 0;
+            for (int i = 1; i < parts.size() && pendingNum < kStatic; ++i)
+            {
+                auto v = juce::StringArray::fromTokens (parts[i], ":", "");
+                if (v.size() == 3)
+                    pendingCurve[(size_t) pendingNum++] = { v[0].getFloatValue(), v[1].getFloatValue(), v[2].getFloatValue() };
+            }
+            pendingCurveReady.store (true, std::memory_order_release);
+        }
+    }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

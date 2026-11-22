@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <vector>
 
 namespace haldendsp
@@ -82,6 +83,18 @@ public:
         return delayed + coeff * v;
     }
 
+    // Same as process(), but the internal delay is read at two lengths and crossfaded (x: 0 -> 1),
+    // so a length change never stretches the delay (no pitch bend).
+    inline float processX (float input, float dA, float dB, float x, float coeff, bool hq = false) noexcept
+    {
+        const float a = delay.read (dA, hq);
+        const float delayed = x > 0.0f ? a + (delay.read (dB, hq) - a) * x : a;
+        float v = flushDenormal (input - coeff * delayed);
+        v = juce::jlimit (-4.0f, 4.0f, v);
+        delay.write (v);
+        return delayed + coeff * v;
+    }
+
     DelayLine delay;
 };
 
@@ -116,6 +129,47 @@ public:
         b2 = b0;
         a1 = (-2.0f * cosw0) / a0;
         a2 = (1.0f - alpha) / a0;
+    }
+
+    void setPeak (float freq, float sr, float q, float gainDb) noexcept
+    {
+        const float f = juce::jlimit (20.0f, sr * 0.45f, freq);
+        const float A = std::pow (10.0f, gainDb / 40.0f);
+        const float w0 = juce::MathConstants<float>::twoPi * f / sr;
+        const float alpha = std::sin (w0) / (2.0f * q);
+        const float cosw0 = std::cos (w0);
+        const float a0 = 1.0f + alpha / A;
+        b0 = (1.0f + alpha * A) / a0;
+        b1 = (-2.0f * cosw0) / a0;
+        b2 = (1.0f - alpha * A) / a0;
+        a1 = b1;
+        a2 = (1.0f - alpha / A) / a0;
+    }
+
+    void setHighShelf (float freq, float sr, float gainDb) noexcept
+    {
+        const float f = juce::jlimit (20.0f, sr * 0.45f, freq);
+        const float A = std::pow (10.0f, gainDb / 40.0f);
+        const float w0 = juce::MathConstants<float>::twoPi * f / sr;
+        const float cosw0 = std::cos (w0);
+        const float alpha = std::sin (w0) / 2.0f * std::sqrt (2.0f);
+        const float sq = 2.0f * std::sqrt (A) * alpha;
+        const float a0 = (A + 1.0f) - (A - 1.0f) * cosw0 + sq;
+        b0 = A * ((A + 1.0f) + (A - 1.0f) * cosw0 + sq) / a0;
+        b1 = -2.0f * A * ((A - 1.0f) + (A + 1.0f) * cosw0) / a0;
+        b2 = A * ((A + 1.0f) + (A - 1.0f) * cosw0 - sq) / a0;
+        a1 = 2.0f * ((A - 1.0f) - (A + 1.0f) * cosw0) / a0;
+        a2 = ((A + 1.0f) - (A - 1.0f) * cosw0 - sq) / a0;
+    }
+
+    // magnitude response in dB at freq (for drawing curves)
+    float magnitudeDb (float freq, float sr) const noexcept
+    {
+        const double w = juce::MathConstants<double>::twoPi * freq / sr;
+        const std::complex<double> z1c = std::polar (1.0, -w), z2c = std::polar (1.0, -2.0 * w);
+        const auto num = (double) b0 + (double) b1 * z1c + (double) b2 * z2c;
+        const auto den = 1.0 + (double) a1 * z1c + (double) a2 * z2c;
+        return static_cast<float> (20.0 * std::log10 (std::abs (num / den) + 1.0e-12));
     }
 
     inline float process (float x) noexcept
@@ -242,6 +296,38 @@ struct OnsetDetector
 };
 
 // Simple per-sample linear smoother that is cheap enough to run on many values
+// A length (delay time / size) that changes by crossfading between the old and the new value
+// instead of sliding. Reads use a (old), b (new) and x (0..1).
+struct XfadeLength
+{
+    void reset (double sampleRate, double seconds, float initial)
+    {
+        steps = std::max (1, static_cast<int> (sampleRate * seconds));
+        a = b = target = initial;
+        x = 0.0f;
+        inc = 1.0f / static_cast<float> (steps);
+    }
+    void setTarget (float t) noexcept { target = t; }
+    // call once per sample
+    inline void tick (float tolerance) noexcept
+    {
+        if (x > 0.0f)
+        {
+            x += inc;
+            if (x >= 1.0f) { a = b; x = 0.0f; }
+        }
+        else if (std::abs (target - a) > tolerance)
+        {
+            b = target;
+            x = inc;
+        }
+    }
+    inline float current() const noexcept { return a + (b - a) * x; }
+
+    float a = 1.0f, b = 1.0f, target = 1.0f, x = 0.0f, inc = 0.01f;
+    int steps = 100;
+};
+
 struct Smooth
 {
     void reset (double sampleRate, double seconds, float initial)

@@ -93,6 +93,44 @@ static float noiseBurst (int n, double sr, float secs)
     return n < (int) (sr * secs) ? (r.nextFloat() * 2.0f - 1.0f) * 0.3f : 0.0f;
 }
 
+// Synthetic sung phrase (A3 C#4 E4 A4, vibrato, "ah" formants), 4.4 s loop with 2.4 s rest.
+struct Voice
+{
+    double sr = 48000.0, ph = 0.0;
+    int lastNote = -1;
+    std::array<haldendsp::BiquadFilter, 3> form;
+    haldendsp::BiquadFilter tilt, breathHp;
+    juce::Random rng { 11 };
+    explicit Voice (double s) : sr (s)
+    {
+        tilt.setLowPass (3500.0f, (float) sr, 0.7f);
+        breathHp.setHighPass (2000.0f, (float) sr);
+    }
+    void setVowel (int k)
+    {
+        // a, i, u, e
+        static const float F[4][3] = { { 800, 1150, 2900 }, { 300, 2300, 3000 }, { 350, 800, 2400 }, { 530, 1850, 2500 } };
+        for (int i = 0; i < 3; ++i) form[(size_t) i].setPeak (F[k & 3][i], (float) sr, 4.0f, 12.0f - 3.0f * (float) i);
+    }
+    float next (int n, bool legatoLoop = false)
+    {
+        const double t = n / sr;
+        const double cyc = legatoLoop ? std::fmod (t, 2.0) : std::fmod (t, 4.4);
+        static const double notes[] = { 220.0, 277.18, 329.63, 440.0 };
+        const int k = (int) (cyc / 0.5);
+        const double nt = cyc - k * 0.5;
+        if (k >= 4 || nt >= 0.46) return 0.0f;
+        if (k != lastNote) { setVowel (k + (int) (t / 2.0)); lastNote = k; }
+        const double f0 = notes[k] * (1.0 + 0.012 * std::sin (juce::MathConstants<double>::twoPi * 5.5 * t));
+        ph += f0 / sr; ph -= std::floor (ph);
+        const double env = std::min (1.0, nt / 0.03) * std::min (1.0, (0.46 - nt) / 0.05);
+        float x = (float) (2.0 * ph - 1.0) * 0.25f;
+        for (auto& f : form) x = f.process (x);
+        x = tilt.process (x) + breathHp.process ((rng.nextFloat() * 2.0f - 1.0f) * 0.01f);
+        return 0.5f * (float) env * x;
+    }
+};
+
 static int runDsp()
 {
     const double sr = 48000.0;
@@ -265,6 +303,94 @@ static int runDsp()
         check (ms < 20000 * 0.25, "CPU, all FX on (20 s audio)", juce::String (ms, 0) + " ms = " + juce::String (ms / 200.0, 1) + "% of one core");
     }
 
+    { // 15b. CPU in HaalAi (analyser + 3 dynamic bells + static curve)
+        P p; setP (p, "algorithm", 7);
+        Voice v (sr);
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        render (p, sr, 20, [&] (int n, int ch) { static float last = 0; if (ch == 1) return last; last = v.next (n, true); return last; });
+        const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+        check (ms < 20000 * 0.25, "CPU, HaalAi (20 s audio)", juce::String (ms, 0) + " ms = " + juce::String (ms / 200.0, 1) + "% of one core");
+    }
+    { // 16. Turning Size during a tail does not bend the pitch of the notes
+        const auto tonalShare = [&] (const std::vector<float>& x, int from)
+        {
+            constexpr int order = 15, N = 1 << order;
+            juce::dsp::FFT f (order);
+            std::vector<float> buf (2 * N, 0.0f);
+            for (int i = 0; i < N && from + i < (int) x.size(); ++i)
+                buf[(size_t) i] = x[(size_t) (from + i)] * (0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * (float) i / (float) N));
+            f.performFrequencyOnlyForwardTransform (buf.data());
+            const double bin = sr / N; double c = 0, w = 0;
+            for (int k = (int) (300 / bin); k <= (int) (650 / bin); ++k) { const double e = (double) buf[(size_t) k] * buf[(size_t) k]; w += e; if (std::abs (k * bin - 440.0) <= 6.0) c += e; }
+            return c / w;
+        };
+        const auto run = [&] (bool sweep)
+        {
+            P p; setP (p, "mix", 1); setP (p, "decay", 6); setP (p, "spin", 0); setP (p, "wander", 0); setP (p, "algorithm", 2);
+            auto o = render (p, sr, 3.0, [&] (int n, int) { return n < 48000 ? 0.4f * std::sin (n * juce::MathConstants<float>::twoPi * 440.0f / 48000.0f) : 0.0f; },
+                             [&] (int pos) { if (sweep && pos >= 48000 && pos < 96000) setP (p, "size", 0.5f + 0.7f * (float) (pos - 48000) / 48000.0f); });
+            return tonalShare (o.L, 52000);
+        };
+        const double still = run (false), moving = run (true);
+        check (moving > 0.8 * still, "Size sweep keeps the note in tune", juce::String (100.0 * moving, 1) + " % at 440 Hz while turning vs " + juce::String (100.0 * still, 1) + " % still");
+    }
+    { // 17. HaalAi learns the voice and cuts its boom and ringing resonance
+        P p; setP (p, "algorithm", 7); setP (p, "mix", 1);
+        Voice v (sr);
+        haldendsp::BiquadFilter boom, ring;
+        boom.setPeak (350.0f, (float) sr, 3.0f, 8.0f); ring.setPeak (2800.0f, (float) sr, 6.0f, 9.0f);
+        render (p, sr, 9.0, [&] (int n, int ch) { static float last = 0; if (ch == 1) return last; last = ring.process (boom.process (v.next (n, true))); return last; });
+        const int nb = p.haalNumStatic.load();
+        bool boomCut = false, ringCut = false; juce::String s;
+        for (int b = 0; b < nb; ++b)
+        {
+            const float f = p.haalStaticF[(size_t) b].load(), g = p.haalStaticG[(size_t) b].load();
+            s << juce::roundToInt (f) << "Hz " << juce::String (g, 1) << "dB  ";
+            if (std::abs (std::log2 (f / 350.0f)) < 0.35f && g < -2.0f) boomCut = true;
+            if (std::abs (std::log2 (f / 2800.0f)) < 0.3f && g < -2.0f) ringCut = true;
+        }
+        check (p.haalProgress.load() >= 1.0f && boomCut && ringCut, "HaalAi curve cuts 350 Hz boom and 2.8 kHz ring", s);
+
+        // the learned curve survives saving and reopening the project
+        juce::MemoryBlock mb; p.getStateInformation (mb);
+        P q; q.setStateInformation (mb.getData(), (int) mb.getSize()); setP (q, "algorithm", 7);
+        render (q, sr, 0.2, [] (int, int) { return 0.0f; });
+        check (q.haalNumStatic.load() == nb && ! q.haalLearning.load(), "HaalAi curve is restored with the project", juce::String (q.haalNumStatic.load()) + " bands");
+    }
+    { // 18. D1-D3 follow a harsh resonance that comes and goes, max 2 dB
+        P p; setP (p, "algorithm", 7); setP (p, "mix", 1);
+        Voice v (sr);
+        haldendsp::BiquadFilter harsh;
+        float harshHz = 3500.0f;
+        double onHit = 0, onTotal = 0, offRelease = 0, offTotal = 0; float maxCut = 0;
+        const auto stepFn = [&] (int pos)
+        {
+            const double t = pos / sr;
+            if (t < 6.0) return;
+            const bool on = std::fmod (t, 1.0) < 0.5;
+            harshHz = 4200.0f * std::pow (2.0f, 0.2f * (float) std::sin (t * 0.9));   // the resonance wanders
+            harsh.setPeak (harshHz, (float) sr, 8.0f, on ? 14.0f : 0.0f);
+            const double ph = std::fmod (t, 0.5);
+            bool tracked = false; float cut = 0;
+            for (int b = 0; b < 3; ++b)
+            {
+                const float f = p.haalDynF[(size_t) b].load(), g = p.haalDynG[(size_t) b].load();
+                maxCut = std::min (maxCut, g);
+                if (std::abs (std::log2 (f / harshHz)) < 0.2f && g < -0.8f) tracked = true;
+                if (std::abs (std::log2 (f / harshHz)) < 0.2f) cut = std::min (cut, g);
+            }
+            if (ph > 0.15)
+            {
+                if (on) { onTotal++; if (tracked) onHit++; }
+                else    { offTotal++; if (cut > -0.5f) offRelease++; }
+            }
+        };
+        render (p, sr, 12.0, [&] (int n, int ch) { static float last = 0; if (ch == 1) return last; last = harsh.process (v.next (n, true)); return last; }, stepFn);
+        check (onHit / std::max (1.0, onTotal) > 0.8, "D bands lock onto the wandering resonance", juce::String (100.0 * onHit / std::max (1.0, onTotal), 0) + " % of the time");
+        check (offRelease / std::max (1.0, offTotal) > 0.8, "D bands let go when it disappears", juce::String (100.0 * offRelease / std::max (1.0, offTotal), 0) + " % of the time");
+        check (maxCut >= -2.01f, "D bands never cut more than 2 dB", juce::String (maxCut, 2) + " dB");
+    }
+
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }
@@ -275,13 +401,16 @@ struct Feeder : juce::Thread
     explicit Feeder (P& p) : juce::Thread ("feeder"), proc (p) {}
     void run() override
     {
-        juce::AudioBuffer<float> b (2, 480); juce::MidiBuffer m; juce::Random r; int n = 0;
+        juce::AudioBuffer<float> b (2, 480); juce::MidiBuffer m; int n = 0;
+        Voice v (48000.0);
+        haldendsp::BiquadFilter boom, harsh;
+        boom.setPeak (330.0f, 48000.0f, 2.5f, 6.0f);
         while (! threadShouldExit())
         {
+            harsh.setPeak (3300.0f * std::pow (2.0f, 0.2f * std::sin (n / 48000.0f * 1.3f)), 48000.0f, 7.0f, std::fmod (n / 48000.0f, 1.0f) < 0.6f ? 12.0f : 0.0f);
             for (int i = 0; i < 480; ++i, ++n)
             {
-                const float env = std::fmod (n / 48000.0f, 0.5f) < 0.18f ? 1.0f : 0.05f;
-                const float x = env * (0.35f * std::sin (n * 0.0573f) + 0.18f * std::sin (n * 0.193f) + 0.12f * (r.nextFloat() * 2 - 1));
+                const float x = 2.0f * harsh.process (boom.process (v.next (n, true)));
                 b.setSample (0, i, x); b.setSample (1, i, x * 0.9f);
             }
             proc.processBlock (b, m);
@@ -329,6 +458,22 @@ static int runShots (const juce::String& dir)
                     k->slider.setValue (4.2);
         settle (700);
         shoot (*e, out.getChildFile ("3_decay_touch.png"));
+    }
+
+    {
+        // HaalAi: let it learn the feeder for a few seconds, then show the curve and D1-D3
+        setP (p, "algorithm", 7); setP (p, "shimOn", 0); setP (p, "pumpOn", 0);
+        p.apvts.state.setProperty ("uiDrawerOpen", false, nullptr);
+        p.apvts.state.setProperty ("uiRackOpen", false, nullptr);
+        std::unique_ptr<juce::AudioProcessorEditor> e (p.createEditor());
+        e->setVisible (true); settle (2500);
+        shoot (*e, out.getChildFile ("4_haalai_learning.png"));
+        settle (5000);
+        shoot (*e, out.getChildFile ("5_haalai.png"));
+        std::printf ("editor size %dx%d\n", e->getWidth(), e->getHeight());
+        for (int b = 0; b < p.haalNumStatic.load(); ++b)
+            std::printf ("static band %d: %.0f Hz %.1f dB Q %.2f\n", b, p.haalStaticF[(size_t) b].load(), p.haalStaticG[(size_t) b].load(), p.haalStaticQ[(size_t) b].load());
+        std::printf ("air shelf %.1f dB\n", p.haalShelf.load());
     }
     feeder.stopThread (2000);
     return 0;

@@ -117,8 +117,9 @@ public:
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
     void update (double nowSec);                   // pulls audio and advances the analyser
-    void showEnvelope (double nowSec) { envTouch = nowSec; }
-    void showEq (double nowSec) { eqTouch = nowSec; }
+    // keeps the overlay up for as long as the knob keeps moving (no restart of the fade-in)
+    void showEnvelope (double nowSec) { if (nowSec - envTouch > 2.2) envStart = nowSec; envTouch = nowSec; }
+    void showEq (double nowSec) { if (nowSec - eqTouch > 2.2) eqStart = nowSec; eqTouch = nowSec; }
 
 private:
     HaldenReverbAudioProcessor& proc;
@@ -132,7 +133,9 @@ private:
     std::vector<float> fftData = std::vector<float> (kFftSize * 2, 0.0f);
     std::array<float, kPoints> curveDb {}, peakDb {};
     std::array<double, kPoints> peakTime {};
-    double envTouch = -100.0, eqTouch = -100.0, now = 0.0, lastUpdate = 0.0;
+    double envTouch = -100.0, eqTouch = -100.0, envStart = -100.0, eqStart = -100.0, now = 0.0, lastUpdate = 0.0;
+    float overlayAlpha (double start, double touch) const;
+    void paintHaalAi (juce::Graphics&, juce::Rectangle<float> area);
 
     float xForFreq (float f) const;
     float yForDb (float db) const;
@@ -177,6 +180,7 @@ public:
     void resized() override;
 
     static constexpr int kPanelW = 1000, kRackW = 290, kClosedH = 610, kOpenH = 830;
+    float getEffectiveScale() const { return effScale; }
 
 private:
     class Content : public juce::Component
@@ -212,7 +216,10 @@ private:
     hui::Knob* duckKnob = nullptr;
 
     bool drawerOpen = true, rackOpen = false;
-    float uiScale = 1.0f;
+    float uiScale = 1.0f, effScale = 1.0f;
+    bool applyingSize = false;
+    juce::TextButton learnButton;
+    float maxScaleForScreen (int w, int h) const;
 
     friend class Content;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HaldenReverbAudioProcessorEditor)
