@@ -507,12 +507,27 @@ static int runShots (const juce::String& dir)
         std::unique_ptr<juce::AudioProcessorEditor> e (p.createEditor());
         e->setVisible (true); settle (4000);
         shoot (*e, out.getChildFile ("2_full.png"));
-        // touch Decay -> LCD shows the decay envelope
+        // grab Pre-Delay and move it 20 -> 200 ms, then let go
+        hui::Knob* pre = nullptr;
         for (auto* c : e->getChildComponent (0)->getChildren())
             if (auto* k = dynamic_cast<hui::Knob*> (c))
-                if (std::abs (k->slider.getMaximum() - 15.0) < 0.01)
-                    k->slider.setValue (4.2);
-        settle (700);
+                if (std::abs (k->slider.getMaximum() - 250.0) < 0.01) pre = k;
+        if (pre != nullptr)
+        {
+            pre->onHold (true);
+            int frame = 0;
+            for (double v : { 20.0, 80.0, 140.0, 200.0 })
+            {
+                pre->slider.setValue (v); settle (350);
+                shoot (*e, out.getChildFile ("pre_" + juce::String (frame++) + ".png"));
+            }
+            pre->onHold (false); settle (250);
+            shoot (*e, out.getChildFile ("pre_release_250ms.png"));
+            settle (500);
+            shoot (*e, out.getChildFile ("pre_release_750ms.png"));
+            pre->slider.setValue (28.0);
+            pre->onHold (true); pre->slider.setValue (30.0); settle (300);
+        }
         shoot (*e, out.getChildFile ("3_decay_touch.png"));
     }
 

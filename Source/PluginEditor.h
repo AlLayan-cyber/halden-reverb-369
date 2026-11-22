@@ -57,6 +57,7 @@ public:
     std::function<juce::String()> valueOverride;      // optional live readout (ducking)
     std::function<float()> ringReductionDb;            // optional glow ring (ducking)
     std::function<void()> onTouched;
+    std::function<void (bool)> onHold;   // knob grabbed / released
 
 private:
     juce::String paramId, label;
@@ -119,10 +120,12 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void update (double nowSec);                   // pulls audio and advances the analyser
     // keeps the overlay up for as long as the knob keeps moving (no restart of the fade-in)
-    // the picture is taken when the overlay appears and re-taken 1 s after the knob stops,
-    // so it never jitters while a knob is moving
-    void showEnvelope (double nowSec) { if (nowSec - envTouch > 2.8) { envStart = nowSec; snapEnvelope(); } envTouch = nowSec; envSnapped = false; }
-    void showEq (double nowSec) { if (nowSec - eqTouch > 2.8) { eqStart = nowSec; snapEq(); } eqTouch = nowSec; eqSnapped = false; }
+    // overlays follow the knob smoothly on a time axis that stays put while it is held,
+    // and fade out smoothly as soon as it is let go
+    void showEnvelope (double nowSec) { envOv.last = nowSec; }
+    void holdEnvelope (bool held, double nowSec) { envOv.held = held; envOv.last = nowSec; }
+    void showEq (double nowSec) { eqOv.last = nowSec; }
+    void holdEq (bool held, double nowSec) { eqOv.held = held; eqOv.last = nowSec; }
 
 private:
     HaldenReverbAudioProcessor& proc;
@@ -136,12 +139,13 @@ private:
     std::vector<float> fftData = std::vector<float> (kFftSize * 2, 0.0f);
     std::array<float, kPoints> curveDb {}, peakDb {};
     std::array<double, kPoints> peakTime {};
-    double envTouch = -100.0, eqTouch = -100.0, envStart = -100.0, eqStart = -100.0, now = 0.0, lastUpdate = 0.0;
-    float overlayAlpha (double start, double touch) const;
-    void snapEnvelope();
-    void snapEq();
-    float snapDecay = 3.0f, snapPre = 20.0f, snapShape = 0.4f, snapSize = 0.85f, snapLo = 500.0f, snapHi = 6000.0f;
-    bool envSnapped = true, eqSnapped = true;
+    double now = 0.0, lastUpdate = 0.0;
+    struct Overlay { double last = -100.0; bool held = false; float alpha = 0.0f; };
+    Overlay envOv, eqOv;
+    float dDecay = 3.0f, dPre = 20.0f, dShape = 0.4f, dSize = 0.85f, dLo = 500.0f, dHi = 6000.0f;
+    float spanTarget = 4.0f, dSpan = 4.0f;
+    void animateOverlays (float dt);
+    static float niceSpan (float seconds);
     void paintHaalAi (juce::Graphics&, juce::Rectangle<float> area);
 
     float xForFreq (float f) const;

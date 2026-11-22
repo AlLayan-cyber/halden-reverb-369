@@ -40,7 +40,7 @@ void setStyle (juce::Component& c, const char* style) { c.getProperties().set ("
 
 juce::String hui::formatValue (const juce::String& id, float v)
 {
-    if (id == "preDelayMs") return juce::String (v, v < 10.0f && id == "preDelayMs" ? 1 : 0) + " ms";
+    if (id == "preDelayMs") return v < 10.0f ? juce::String (std::round (v * 10.0f) / 10.0f, 1) + " ms" : juce::String (juce::roundToInt (v)) + " ms";
     if (id == "decay")      return juce::String (v, v < 10.0f ? 2 : 1) + " s";
     if (id == "freezeFade") return juce::String (v, 2) + " s";
     if (id == "highCutHz" || id == "crossoverHz" || id == "eqLowCutHz" || id == "eqHighCutHz" || id == "monoHz") return hz (v);
@@ -214,7 +214,8 @@ Knob::Knob (juce::AudioProcessorValueTreeState& s, const juce::String& id, const
     if (auto* p = s.getParameter (id))
         slider.setDoubleClickReturnValue (true, p->convertFrom0to1 (p->getDefaultValue()));
     slider.onValueChange = [this] { repaint(); if (onTouched) onTouched(); };
-    slider.onDragStart = [this] { if (onTouched) onTouched(); };
+    slider.onDragStart = [this] { if (onHold) onHold (true); if (onTouched) onTouched(); };
+    slider.onDragEnd = [this] { if (onHold) onHold (false); };
 }
 
 void Knob::resized()
@@ -460,6 +461,7 @@ void Lcd::update (double nowSec)
     const float dt = lastUpdate > 0.0 ? static_cast<float> (nowSec - lastUpdate) : 0.033f;
     lastUpdate = nowSec;
     now = nowSec;
+    animateOverlays (juce::jlimit (0.001f, 0.1f, dt));
 
     auto& fifo = proc.scopeFifo;
     const int ready = fifo.getNumReady();
@@ -590,14 +592,10 @@ void Lcd::paint (juce::Graphics& g)
 
         // Post-EQ curve: always while EQ is on, briefly while its cutoffs are being touched
         const bool eqOn = st.getRawParameterValue ("eqEnabled")->load() >= 0.5f;
-        const float eqTouchA = overlayAlpha (eqStart, eqTouch);
-        const float eqA = eqOn ? 0.9f : eqTouchA * 0.6f;
+        const float eqA = eqOn ? 0.9f : eqOv.alpha * 0.6f;
         if (eqA > 0.01f)
         {
-            if (! eqSnapped && now - eqTouch >= 1.0) { snapEq(); eqSnapped = true; }
-            const bool liveEq = eqTouchA <= 0.01f;   // EQ just switched on, nothing touched: follow the knobs
-            const float lo = liveEq ? st.getRawParameterValue ("eqLowCutHz")->load() : snapLo;
-            const float hi = liveEq ? st.getRawParameterValue ("eqHighCutHz")->load() : snapHi;
+            const float lo = dLo, hi = dHi;
             juce::Path eq;
             for (int i = 0; i <= 120; ++i)
             {
@@ -616,17 +614,16 @@ void Lcd::paint (juce::Graphics& g)
     if (algoNow == HaldenReverbAudioProcessor::kHaalAlgo)
         paintHaalAi (g, a);
 
-    // decay envelope overlay: fades in once, stays while the knob moves, fades after release
-    const float envA = overlayAlpha (envStart, envTouch);
+    // decay envelope overlay: follows the knob on a fixed time axis, fades out on release
+    const float envA = envOv.alpha;
     if (envA > 0.01f)
     {
         // cover the moving spectrum completely so nothing jitters under the curve
         g.setColour (col::lcdBg.withAlpha (0.97f * envA));
-        g.fillRect (a.expanded (2.0f));
+        g.fillRect (a.withBottom (a.getBottom() + 20.0f).expanded (2.0f));   // also hides the Hz labels
 
-        if (! envSnapped && now - envTouch >= 1.0) { snapEnvelope(); envSnapped = true; }
-        const float decay = snapDecay, pre = snapPre, shape = snapShape, size = snapSize;
-        const float maxSec = std::max (2.0f, decay * 1.25f + pre * 0.001f);
+        const float decay = dDecay, pre = dPre, shape = dShape, size = dSize;
+        const float maxSec = dSpan;
         const float preX = a.getX() + (pre * 0.001f / maxSec) * a.getWidth();
         const float bloomSec = 0.02f + shape * 0.12f + size * 0.05f;
 
@@ -645,8 +642,22 @@ void Lcd::paint (juce::Graphics& g)
         g.setColour (col::blueBright.withAlpha (envA));
         g.strokePath (env, juce::PathStrokeType (2.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
+        // time axis (replaces the frequency labels while the overlay is up)
+        g.setFont (font (11.0f));
+        for (int i = 0; i <= 4; ++i)
+        {
+            const float tsec = maxSec * static_cast<float> (i) / 4.0f;
+            const float x = a.getX() + a.getWidth() * static_cast<float> (i) / 4.0f;
+            g.setColour (juce::Colour (0xff0f2340).withAlpha (envA));
+            g.drawVerticalLine (juce::roundToInt (x), a.getY(), a.getBottom());
+            g.setColour (juce::Colour (0xff4f77ad).withAlpha (envA));
+            const juce::String lab = tsec < 1.0f ? juce::String (juce::roundToInt (tsec * 1000.0f)) + " ms" : juce::String (tsec, tsec < 10.0f && std::abs (tsec - std::round (tsec)) > 0.01f ? 1 : 0) + " s";
+            g.drawText (lab, juce::Rectangle<float> (x - 30.0f, a.getBottom() + 4.0f, 60.0f, 14.0f),
+                        i == 0 ? juce::Justification::centredLeft : i == 4 ? juce::Justification::centredRight : juce::Justification::centred);
+        }
+
         g.setFont (font (13.0f));
-        g.drawText ("DECAY " + formatValue ("decay", decay) + "   PRE " + formatValue ("preDelayMs", pre),
+        g.drawText ("DECAY " + formatValue ("decay", st.getRawParameterValue ("decay")->load()) + "   PRE " + formatValue ("preDelayMs", st.getRawParameterValue ("preDelayMs")->load()),
                     juce::Rectangle<float> (a.getRight() - 300.0f, a.getY() + 4.0f, 296.0f, 16.0f), juce::Justification::centredRight);
     }
 
@@ -679,28 +690,46 @@ void Lcd::paint (juce::Graphics& g)
     }
 }
 
-void Lcd::snapEnvelope()
+float Lcd::niceSpan (float seconds)
+{
+    for (float s : { 0.5f, 1.0f, 2.0f, 3.0f, 5.0f, 8.0f, 12.0f, 16.0f, 24.0f, 32.0f, 48.0f })
+        if (s >= seconds) return s;
+    return 64.0f;
+}
+
+void Lcd::animateOverlays (float dt)
 {
     const auto& st = proc.apvts;
-    snapDecay = st.getRawParameterValue ("decay")->load();
-    snapPre = st.getRawParameterValue ("preDelayMs")->load();
-    snapShape = st.getRawParameterValue ("shape")->load();
-    snapSize = st.getRawParameterValue ("size")->load();
-}
+    const float decay = st.getRawParameterValue ("decay")->load(), pre = st.getRawParameterValue ("preDelayMs")->load();
+    const float need = decay * 1.3f + pre * 0.001f;
 
-void Lcd::snapEq()
-{
-    snapLo = proc.apvts.getRawParameterValue ("eqLowCutHz")->load();
-    snapHi = proc.apvts.getRawParameterValue ("eqHighCutHz")->load();
-}
+    for (auto* ov : { &envOv, &eqOv })
+    {
+        const bool active = ov->held || now - ov->last < 0.25;   // wheel / automation: short grace
+        const float wasAlpha = ov->alpha;
+        ov->alpha = active ? std::min (1.0f, ov->alpha + dt / 0.12f) : std::max (0.0f, ov->alpha - dt / 0.5f);
+        if (ov == &envOv && wasAlpha <= 0.0f && ov->alpha > 0.0f)
+        {
+            // overlay appears: start from the current values, lock the time axis
+            dDecay = decay; dPre = pre; dShape = st.getRawParameterValue ("shape")->load(); dSize = st.getRawParameterValue ("size")->load();
+            spanTarget = dSpan = niceSpan (need);
+        }
+        if (ov == &eqOv && wasAlpha <= 0.0f && ov->alpha > 0.0f)
+        {
+            dLo = st.getRawParameterValue ("eqLowCutHz")->load(); dHi = st.getRawParameterValue ("eqHighCutHz")->load();
+        }
+    }
 
-float Lcd::overlayAlpha (double start, double touch) const
-{
-    const double sinceStart = now - start, sinceTouch = now - touch;
-    if (sinceTouch < 0.0 || sinceStart < 0.0) return 0.0f;
-    const float fadeIn = static_cast<float> (juce::jlimit (0.0, 1.0, sinceStart / 0.15));
-    const float fadeOut = sinceTouch < 2.4 ? 1.0f : std::max (0.0f, 1.0f - static_cast<float> ((sinceTouch - 2.4) / 0.4));
-    return std::min (fadeIn, fadeOut);
+    // values glide after the knobs (no jumps), the axis only grows if the tail no longer fits
+    const float k = 1.0f - std::exp (-dt / 0.06f);
+    dDecay += k * (decay - dDecay);
+    dPre += k * (pre - dPre);
+    dShape += k * (st.getRawParameterValue ("shape")->load() - dShape);
+    dSize += k * (st.getRawParameterValue ("size")->load() - dSize);
+    dLo += k * (st.getRawParameterValue ("eqLowCutHz")->load() - dLo);
+    dHi += k * (st.getRawParameterValue ("eqHighCutHz")->load() - dHi);
+    if (need > spanTarget) spanTarget = niceSpan (need);
+    dSpan += (1.0f - std::exp (-dt / 0.15f)) * (spanTarget - dSpan);
 }
 
 void Lcd::paintHaalAi (juce::Graphics& g, juce::Rectangle<float> a)
@@ -1181,6 +1210,7 @@ HaldenReverbAudioProcessorEditor::HaldenReverbAudioProcessorEditor (HaldenReverb
         const juce::String id (d.id);
         if (id == "preDelayMs" || id == "size" || id == "decay")
             k->onTouched = [this] { lcd.showEnvelope (juce::Time::getMillisecondCounterHiRes() * 0.001); };
+            k->onHold = [this] (bool held) { lcd.holdEnvelope (held, juce::Time::getMillisecondCounterHiRes() * 0.001); };
         content.addAndMakeVisible (*k);
         mainKnobs.push_back (std::move (k));
     }
@@ -1191,8 +1221,10 @@ HaldenReverbAudioProcessorEditor::HaldenReverbAudioProcessorEditor (HaldenReverb
         const juce::String id (d.id);
         if (id == "shape")
             k->onTouched = [this] { lcd.showEnvelope (juce::Time::getMillisecondCounterHiRes() * 0.001); };
+            k->onHold = [this] (bool held) { lcd.holdEnvelope (held, juce::Time::getMillisecondCounterHiRes() * 0.001); };
         if (id == "eqLowCutHz" || id == "eqHighCutHz")
             k->onTouched = [this] { lcd.showEq (juce::Time::getMillisecondCounterHiRes() * 0.001); };
+            k->onHold = [this] (bool held) { lcd.holdEq (held, juce::Time::getMillisecondCounterHiRes() * 0.001); };
         if (id == "ducking")
         {
             duckKnob = k.get();
