@@ -447,6 +447,28 @@ static int runDsp()
         check (std::abs (val ("decay") - 3.1f) < 0.02f && val ("orbit") == 0.0f && juce::roundToInt (val ("algorithm")) == 2, "RESET: all controls back to defaults", juce::String (val ("decay"), 2) + " s, orbit " + juce::String (val ("orbit"), 2));
     }
 
+    { // 25. Ducking: holds through the gaps between words, comes back slowly and smoothly
+        const auto run = [&] (float duck)
+        {
+            P p; setP (p, "algorithm", 2); setP (p, "mix", 1); setP (p, "decay", 4); setP (p, "ducking", duck);
+            Voice v (sr);   // notes of 0.46 s with 40 ms gaps, phrase ends at 2.0 s
+            return render (p, sr, 4.0, [&] (int n, int ch) { static float l = 0; if (ch == 1) return l; l = v.next (n); return l; });
+        };
+        auto a = run (0.6f), b = run (0.0f);
+        const int hop = (int) (0.005 * sr);
+        std::vector<double> g;
+        for (size_t i = 0; i + (size_t) hop < a.L.size(); i += (size_t) hop)
+            g.push_back (10 * std::log10 ((energy (a.L, i, i + (size_t) hop) + 1e-14) / (energy (b.L, i, i + (size_t) hop) + 1e-14)));
+        const auto at = [&] (double t) { return g[(size_t) (t / 0.005)]; };
+        double gapRise = 0;   // gain change inside the 40 ms gaps
+        for (double t0 : { 0.46, 0.96, 1.46 })
+            for (double t = t0; t < t0 + 0.06; t += 0.005) gapRise = std::max (gapRise, at (t) - at (t0 - 0.02));
+        double maxStep = 0; for (size_t i = (size_t) (2.0 / 0.005); i + 1 < (size_t) (3.6 / 0.005); ++i) maxStep = std::max (maxStep, g[i + 1] - g[i]);
+        check (gapRise < 1.0, "Ducking holds between words (no swell)", "max rise in gaps " + juce::String (gapRise, 2) + " dB");
+        check (at (2.15) < -10.0 && at (2.5) < -2.0 && at (3.6) > -1.0 && maxStep < 0.6, "Ducking returns slowly, no jump",
+               "GR +150 ms " + juce::String (at (2.15), 1) + ", +500 ms " + juce::String (at (2.5), 1) + ", +1.6 s " + juce::String (at (3.6), 1) + " dB, step " + juce::String (maxStep, 2) + " dB/5ms");
+    }
+
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }

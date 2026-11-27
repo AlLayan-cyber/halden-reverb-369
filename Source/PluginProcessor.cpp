@@ -219,7 +219,8 @@ void HaldenReverbAudioProcessor::releaseResources()
     onset.prepare (currentSampleRate);
     samplesSinceOnset = 1.0e9;
     glideSemis = riserSmooth = glideW = actFast = actPeak = shimEnv = lastWetL = lastWetR = 0.0f;
-    tankL = tankR = xoverLpL = xoverLpR = dampLpL = dampLpR = inHpL = inHpR = dryEnv = duckEnv = 0.0f;
+    tankL = tankR = xoverLpL = xoverLpR = dampLpL = dampLpR = inHpL = inHpR = dryEnv = duckEnv = duckSq = duckHeldDb = duckGrDb = 0.0f;
+    duckHold = 0;
     pumpGain = 1.0f;
     orbitS = 0.0f; launchActive = false; spaceWasOn = false;
     spaceDryL.reset(); spaceDryR.reset();
@@ -491,6 +492,12 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const float hpAlpha = 1.0f - std::exp ((-twoPi * 35.0f) / sr);
     const float envAtk = 1.0f - std::exp (-1.0f / (0.004f * sr));
     const float envRel = 1.0f - std::exp (-1.0f / (0.18f * sr));
+    // ducker: RMS detector, hold across the gaps between words, smooth dB attack / slow release
+    const float duckDepthDb = 24.0f * ducking;
+    const float duckDet = 1.0f - std::exp (-1.0f / (0.010f * sr));
+    const float duckAtk = 1.0f - std::exp (-1.0f / (0.015f * sr));
+    const float duckRel = 1.0f - std::exp (-1.0f / (0.40f * sr));
+    const int duckHoldSamples = static_cast<int> (0.18f * sr);
     const float pumpAlpha = 1.0f - std::exp (-1.0f / (0.003f * sr));
     const float actAtk = 1.0f - std::exp (-1.0f / (0.002f * sr));
     const float actRel = 1.0f - std::exp (-1.0f / (0.040f * sr));
@@ -566,9 +573,18 @@ void HaldenReverbAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         // ---- Ducking envelope (dry level)
         const float dryLvl = std::max (std::abs (dryL), std::abs (dryR));
         dryEnv += (dryLvl > dryEnv ? envAtk : envRel) * (dryLvl - dryEnv);
-        const float duckGain = ducking > 0.001f
-            ? std::max (0.063f, 1.0f / (1.0f + dryEnv * ducking * 22.0f))
-            : 1.0f;
+        float duckGain = 1.0f;
+        {
+            duckSq += duckDet * (0.5f * (dryL * dryL + dryR * dryR) - duckSq);
+            const float lvlDb = 10.0f * std::log10 (duckSq + 1.0e-12f);
+            const float target = duckDepthDb * smoothstep (-48.0f, -34.0f, lvlDb);   // any sung level ducks fully
+            if (target >= duckHeldDb - 0.5f) { duckHeldDb = std::max (target, duckHeldDb); duckHold = duckHoldSamples; }
+            else if (duckHold > 0) --duckHold;                                          // keep it through short gaps
+            else duckHeldDb = target;
+            duckGrDb += (duckHeldDb > duckGrDb ? duckAtk : duckRel) * (duckHeldDb - duckGrDb);
+            if (duckGrDb < 1.0e-4f) duckGrDb = 0.0f;
+            if (duckGrDb > 0.0f) duckGain = std::exp (-0.11512925f * duckGrDb);
+        }
         minDuckGain = std::min (minDuckGain, duckGain);
 
         // ---- Phrase activity (level independent): input counts as "sounding" while it is sustained,

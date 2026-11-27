@@ -134,6 +134,8 @@ private:
     haldendsp::Smooth smPreDelay, smSize, smGMid, smGLow, smErWeight, smLateWeight, smModDepth,
                       smMix, smWidth, smInGain, smOutGain, smShim, smFreeze, smRiserWidth, smRiserGain;
     float pumpGain = 1.0f;
+    float duckSq = 0.0f, duckHeldDb = 0.0f, duckGrDb = 0.0f;
+    int duckHold = 0;
 
     std::array<float, 1024> scopeScratch {};
     int scopeScratchCount = 0;
